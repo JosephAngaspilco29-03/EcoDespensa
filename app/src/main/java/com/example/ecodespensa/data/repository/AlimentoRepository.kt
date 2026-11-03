@@ -1,6 +1,8 @@
 package com.example.ecodespensa.data.repository
 
 import com.example.ecodespensa.data.model.Alimento
+import com.example.ecodespensa.data.model.AlimentoFirestore
+import com.example.ecodespensa.data.model.EliminacionPendiente
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -12,6 +14,7 @@ import kotlinx.coroutines.flow.Flow
  * - Sincronización con Cloud Firestore en etapas posteriores
  */
 interface AlimentoRepository {
+    // ── Operaciones globales (compatibilidad temporal con Etapa 2) ────────────
     fun obtenerAlimentos(): Flow<List<Alimento>>
     /** Agrega un alimento y registra automáticamente un movimiento COMPRA (operación atómica). */
     suspend fun agregarAlimento(alimento: Alimento)
@@ -26,4 +29,135 @@ interface AlimentoRepository {
      */
     suspend fun editarAlimento(alimento: Alimento, cantidadAnterior: Double)
     suspend fun eliminarAlimento(id: Int)
+
+    // ── Operaciones filtradas y verificadas por usuarioUid ────────────────────
+    /** Obtiene la lista reactiva de alimentos pertenecientes a [usuarioUid]. */
+    fun obtenerAlimentosPorUsuario(usuarioUid: String): Flow<List<Alimento>>
+
+    /** Obtiene un alimento por su [id] verificando que pertenezca a [usuarioUid]. */
+    suspend fun obtenerAlimentoPorIdYUsuario(id: Int, usuarioUid: String): Alimento?
+
+    /** Inserta el alimento asociándolo a [usuarioUid]. */
+    suspend fun agregarAlimento(alimento: Alimento, usuarioUid: String)
+
+    /** Registra alimento + movimiento COMPRA asociados a [usuarioUid] en una transacción. */
+    suspend fun agregarAlimentoConCompra(alimento: Alimento, usuarioUid: String)
+
+    /**
+     * Ajusta el stock en una única transacción Room verificando que el alimento pertenezca a [usuarioUid],
+     * que [cantidadAjuste] sea mayor a 0 y que el stock resultante no sea negativo,
+     * marcando `pendienteSincronizacion = true` y [marcaActualizacion], y registrando el movimiento AJUSTE.
+     *
+     * @return El [Alimento] actualizado en Room, o `null` si la validación falla.
+     */
+    suspend fun ajustarStock(
+        alimento: Alimento,
+        cantidadAjuste: Double,
+        usuarioUid: String,
+        marcaActualizacion: Long = System.currentTimeMillis()
+    ): Alimento?
+
+    /** Actualiza el alimento verificando que pertenezca a [usuarioUid]. */
+    suspend fun actualizarAlimentoPorUsuario(alimento: Alimento, usuarioUid: String)
+
+    /**
+     * Edita el alimento verificando que pertenezca a [usuarioUid], conserva su `remoteId`,
+     * lo marca como pendiente de sincronización en Room y registra AJUSTE si cambió la cantidad.
+     * @return `true` si el alimento pertenecía al usuario y fue actualizado en Room.
+     */
+    suspend fun editarAlimento(alimento: Alimento, cantidadAnterior: Double, usuarioUid: String): Boolean
+
+    /**
+     * Registra un consumo en una única transacción Room:
+     * descuenta [cantidad] del stock verificando que el alimento pertenezca a [usuarioUid] y
+     * que no supere el stock disponible, marca `pendienteSincronizacion = true` y [marcaActualizacion],
+     * e inserta el movimiento CONSUMO en el historial local.
+     *
+     * @return El [Alimento] actualizado en Room, o `null` si la validación falla.
+     */
+    suspend fun consumirAlimento(
+        alimentoId: Int,
+        cantidad: Double,
+        usuarioUid: String,
+        marcaActualizacion: Long = System.currentTimeMillis()
+    ): Alimento?
+
+    /**
+     * Registra un desperdicio en una única transacción Room:
+     * descuenta [cantidad] del stock verificando que el alimento pertenezca a [usuarioUid] y
+     * que sea mayor a 0 y no supere el stock disponible, marca `pendienteSincronizacion = true`
+     * y [marcaActualizacion], e inserta el movimiento DESPERDICIO en el historial local.
+     *
+     * @return El [Alimento] actualizado en Room, o `null` si la validación falla.
+     */
+    suspend fun desperdiciarAlimento(
+        alimentoId: Int,
+        cantidad: Double,
+        usuarioUid: String,
+        marcaActualizacion: Long = System.currentTimeMillis()
+    ): Alimento?
+
+    /**
+     * Marca en Room que el alimento con [remoteId] perteneciente a [usuarioUid]
+     * ya fue sincronizado exitosamente con Cloud Firestore.
+     */
+    suspend fun marcarAlimentoSincronizado(
+        remoteId: String,
+        usuarioUid: String,
+        actualizadoEnConfirmado: Long
+    )
+
+    /**
+     * Registra la marca de tiempo remota base si el registro local aún tenía `baseRemotaActualizadoEn == 0`.
+     */
+    suspend fun registrarBaseRemotaSiCero(
+        remoteId: String,
+        usuarioUid: String,
+        baseRemotaActualizadoEn: Long
+    )
+
+    /** Elimina un alimento por [id] verificando que pertenezca a [usuarioUid]. */
+    suspend fun eliminarAlimentoPorUsuario(id: Int, usuarioUid: String)
+
+    /**
+     * Registra de forma persistente una eliminación pendiente (tombstone) en Room y retira
+     * el alimento visible de la despensa dentro de una única transacción, sin borrar su historial.
+     *
+     * @return El registro [EliminacionPendiente] creado, o `null` si el alimento no existe o no pertenece a [usuarioUid].
+     */
+    suspend fun registrarEliminacionPendienteYBorrarLocal(
+        alimentoId: Int,
+        usuarioUid: String,
+        fechaEliminacion: Long = System.currentTimeMillis()
+    ): EliminacionPendiente?
+
+    /** Obtiene las eliminaciones pendientes de sincronizar pertenecientes a [usuarioUid]. */
+    fun obtenerEliminacionesPendientesPorUsuario(usuarioUid: String): Flow<List<EliminacionPendiente>>
+
+    /** Limpia el registro de eliminación pendiente una vez confirmada su baja en Cloud Firestore. */
+    suspend fun limpiarEliminacionPendiente(remoteId: String, usuarioUid: String)
+
+    /** Emite `true` si existen alimentos o movimientos antiguos sin propietario (`usuarioUid = ''`). */
+    fun existenDatosSinPropietario(): Flow<Boolean>
+
+    /**
+     * Vincula en una única transacción Room los alimentos y movimientos antiguos
+     * sin propietario (`usuarioUid = ''`) al [usuarioUid] autenticado.
+     */
+    suspend fun vincularDatosAntiguos(usuarioUid: String)
+
+    /**
+     * Inserta en Room un alimento recuperado desde Cloud Firestore únicamente si su `remoteId`
+     * no existe aún para [usuarioUid].
+     *
+     * - Asigna un nuevo `id` local autogenerado (`id = 0`).
+     * - Conserva `remoteId` y `usuarioUid`.
+     * - NO sobrescribe alimentos existentes ni genera movimientos de COMPRA.
+     *
+     * @return `true` si fue insertado como nuevo registro, `false` si ya existía localmente y se omitió.
+     */
+    suspend fun insertarAlimentoRecuperadoDeNube(
+        alimentoRemoto: AlimentoFirestore,
+        usuarioUid: String
+    ): Boolean
 }

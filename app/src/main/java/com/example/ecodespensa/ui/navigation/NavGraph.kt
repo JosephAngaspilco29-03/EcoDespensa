@@ -140,6 +140,7 @@ fun NavGraph(
         composable(Destino.MiPerfil.ruta) {
             MiPerfilScreen(
                 authViewModel = authViewModel,
+                alimentoViewModel = alimentoViewModel,
                 onVolver = { navController.popBackStack() },
                 onCerrarSesion = {
                     // Cerrar sesión ya fue llamado en MiPerfilScreen;

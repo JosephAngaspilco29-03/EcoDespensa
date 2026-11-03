@@ -7,9 +7,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -41,6 +39,38 @@ fun InicioScreen(
     val totalDisponibles by viewModel.totalDisponibles.collectAsState()
     val proximosAVencer by viewModel.proximosAVencer.collectAsState()
     val vencidos by viewModel.vencidos.collectAsState()
+    val mostrarVincularDatos by viewModel.mostrarOpcionVincularDatosAntiguos.collectAsState()
+    var mostrarDialogoVincular by remember { mutableStateOf(false) }
+
+    if (mostrarDialogoVincular) {
+        AlertDialog(
+            onDismissRequest = { mostrarDialogoVincular = false },
+            title = { Text("Vincular datos antiguos a mi cuenta") },
+            text = {
+                Text(
+                    "Todos los registros antiguos sin propietario (alimentos y movimientos) " +
+                        "pasarán a pertenecer a tu cuenta actual. Los registros que ya tengan " +
+                        "propietario no serán modificados."
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        mostrarDialogoVincular = false
+                        viewModel.vincularDatosAntiguosAMiCuenta()
+                    }
+                ) {
+                    Text("Confirmar")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { mostrarDialogoVincular = false }) {
+                    Text("Cancelar")
+                }
+            }
+        )
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -129,6 +159,22 @@ fun InicioScreen(
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Text("🔔 Probar notificaciones ahora")
+            }
+
+            if (mostrarVincularDatos) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(
+                    onClick = { mostrarDialogoVincular = true },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Sync,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Vincular datos antiguos a mi cuenta")
+                }
             }
 
             Spacer(modifier = Modifier.height(12.dp))

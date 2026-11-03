@@ -10,12 +10,14 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
 import androidx.navigation.compose.rememberNavController
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import com.example.ecodespensa.data.local.EcoDespensaDatabase
 import com.example.ecodespensa.data.repository.AlimentoRepositoryImpl
+import com.example.ecodespensa.data.repository.AuthRepository
 import com.example.ecodespensa.data.repository.MovimientoRepositoryImpl
 import com.example.ecodespensa.ui.history.MovimientoViewModel
 import com.example.ecodespensa.ui.navigation.NavGraph
@@ -23,6 +25,7 @@ import com.example.ecodespensa.ui.pantry.AlimentoViewModel
 import com.example.ecodespensa.ui.theme.EcoDespensaTheme
 import com.example.ecodespensa.worker.NotificationHelper
 import com.example.ecodespensa.worker.VencimientoWorker
+import kotlinx.coroutines.launch
 import java.util.concurrent.TimeUnit
 
 /**
@@ -36,6 +39,7 @@ import java.util.concurrent.TimeUnit
 class MainActivity : ComponentActivity() {
 
     private val db by lazy { EcoDespensaDatabase.getInstance(applicationContext) }
+    private val authRepository by lazy { AuthRepository() }
 
     private val alimentoViewModel: AlimentoViewModel by viewModels {
         AlimentoViewModel.Factory(
@@ -43,12 +47,16 @@ class MainActivity : ComponentActivity() {
                 dao = db.alimentoDao(),
                 transactionDao = db.despensaTransactionDao()
             ),
-            movimientoRepository = MovimientoRepositoryImpl(db.movimientoDao())
+            movimientoRepository = MovimientoRepositoryImpl(db.movimientoDao()),
+            authRepository = authRepository
         )
     }
 
     private val movimientoViewModel: MovimientoViewModel by viewModels {
-        MovimientoViewModel.Factory(MovimientoRepositoryImpl(db.movimientoDao()))
+        MovimientoViewModel.Factory(
+            repository = MovimientoRepositoryImpl(db.movimientoDao()),
+            authRepository = authRepository
+        )
     }
 
     /** Lanzador para solicitar el permiso de notificaciones (Android 13+). */
@@ -65,16 +73,30 @@ class MainActivity : ComponentActivity() {
         // Crear canal antes de cualquier notificación
         NotificationHelper.crearCanal(this)
 
+        // Observar cambios de sesión para limpiar notificaciones y ajustar el Worker por usuario
+        lifecycleScope.launch {
+            authRepository.uidActualFlow.collect { uid ->
+                // Limpiar notificaciones mostradas de la sesión anterior
+                NotificationHelper.cancelarTodas(this@MainActivity)
+                if (uid.isNullOrBlank()) {
+                    WorkManager.getInstance(this@MainActivity)
+                        .cancelUniqueWork(VencimientoWorker.WORK_NAME)
+                } else {
+                    programarWorkerSiTienePermiso()
+                }
+            }
+        }
+
         // Solicitar permiso en Android 13+ o programar directamente en versiones anteriores
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val permiso = Manifest.permission.POST_NOTIFICATIONS
             if (ContextCompat.checkSelfPermission(this, permiso) == PackageManager.PERMISSION_GRANTED) {
-                programarWorkerVencimientos()
+                programarWorkerSiTienePermiso()
             } else {
                 pedirPermisoNotificacion.launch(permiso)
             }
         } else {
-            programarWorkerVencimientos()
+            programarWorkerSiTienePermiso()
         }
 
         setContent {
@@ -89,12 +111,24 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun programarWorkerSiTienePermiso() {
+        if (!authRepository.haySesionActiva) return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val permiso = Manifest.permission.POST_NOTIFICATIONS
+            if (ContextCompat.checkSelfPermission(this, permiso) != PackageManager.PERMISSION_GRANTED) {
+                return
+            }
+        }
+        programarWorkerVencimientos()
+    }
+
     /**
      * Programa una revisión periódica diaria con WorkManager.
      * Usa [ExistingPeriodicWorkPolicy.KEEP] para no reprogramar si ya existe,
      * evitando notificaciones duplicadas al reiniciar la app.
      */
     private fun programarWorkerVencimientos() {
+        if (!authRepository.haySesionActiva) return
         val request = PeriodicWorkRequestBuilder<VencimientoWorker>(
             repeatInterval = 1,
             repeatIntervalTimeUnit = TimeUnit.DAYS

@@ -39,6 +39,72 @@ fun MiDespensaScreen(
     onVolver: () -> Unit
 ) {
     val alimentos by viewModel.alimentos.collectAsState()
+    val mostrarVincularDatos by viewModel.mostrarOpcionVincularDatosAntiguos.collectAsState()
+    val estadoSincronizacionCreacion by viewModel.sincronizacionCreacionState.collectAsState()
+    val remoteIdsPendientes by viewModel.remoteIdsPendientesDeSubir.collectAsState()
+    val eliminacionesPendientes by viewModel.eliminacionesPendientes.collectAsState()
+    var mostrarDialogoVincular by remember { mutableStateOf(false) }
+    var alimentoAEliminar by remember { mutableStateOf<Alimento?>(null) }
+
+    // ── Diálogo de confirmación de eliminación (Etapa 4C.3F) ───────────────────
+    if (alimentoAEliminar != null) {
+        val seleccion = alimentoAEliminar!!
+        AlertDialog(
+            onDismissRequest = { alimentoAEliminar = null },
+            title = { Text("Eliminar alimento", fontWeight = FontWeight.Bold) },
+            text = {
+                Text(
+                    "¿Estás seguro de que deseas eliminar '${seleccion.nombre}' de tu despensa?\n\n" +
+                        "Se retirará de tu despensa y se sincronizará la eliminación con la nube conservando tu historial de movimientos."
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val idAEliminar = seleccion.id
+                        alimentoAEliminar = null
+                        viewModel.eliminar(idAEliminar)
+                    }
+                ) {
+                    Text("Eliminar", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { alimentoAEliminar = null }) {
+                    Text("Cancelar")
+                }
+            }
+        )
+    }
+
+    if (mostrarDialogoVincular) {
+        AlertDialog(
+            onDismissRequest = { mostrarDialogoVincular = false },
+            title = { Text("Vincular datos antiguos a mi cuenta") },
+            text = {
+                Text(
+                    "Todos los registros antiguos sin propietario (alimentos y movimientos) " +
+                        "pasarán a pertenecer a tu cuenta actual. Los registros que ya tengan " +
+                        "propietario no serán modificados."
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        mostrarDialogoVincular = false
+                        viewModel.vincularDatosAntiguosAMiCuenta()
+                    }
+                ) {
+                    Text("Confirmar")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { mostrarDialogoVincular = false }) {
+                    Text("Cancelar")
+                }
+            }
+        )
+    }
 
     // ── Estado diálogos de movimiento ──────────────────────────────────────────
     var dialogAlimento by remember { mutableStateOf<Alimento?>(null) }
@@ -309,6 +375,141 @@ fun MiDespensaScreen(
         ) {
             Spacer(modifier = Modifier.height(8.dp))
 
+            if (mostrarVincularDatos) {
+                Button(
+                    onClick = { mostrarDialogoVincular = true },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Vincular datos antiguos a mi cuenta")
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+            }
+
+            when (val syncState = estadoSincronizacionCreacion) {
+                is SincronizacionCreacionUiState.SubiendoNuevo -> {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.secondaryContainer
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = syncState.mensaje,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                }
+                is SincronizacionCreacionUiState.Sincronizado -> {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = syncState.mensaje,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.weight(1f)
+                            )
+                            TextButton(onClick = { viewModel.limpiarAvisoSincronizacionCreacion() }) {
+                                Text("OK")
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                }
+                is SincronizacionCreacionUiState.PendienteDeSubir -> {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp),
+                        color = Color(0xFFFFF3CD)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = syncState.mensaje,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFF856404),
+                                modifier = Modifier.weight(1f)
+                            )
+                            TextButton(onClick = { viewModel.limpiarAvisoSincronizacionCreacion() }) {
+                                Text("OK", color = Color(0xFF856404))
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                }
+                is SincronizacionCreacionUiState.ErrorSincronizacion -> {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.errorContainer
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = syncState.mensaje,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                modifier = Modifier.weight(1f)
+                            )
+                            TextButton(onClick = { viewModel.limpiarAvisoSincronizacionCreacion() }) {
+                                Text("OK", color = MaterialTheme.colorScheme.onErrorContainer)
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                }
+                SincronizacionCreacionUiState.Idle -> Unit
+            }
+
+            if (eliminacionesPendientes.isNotEmpty()) {
+                val nombresPendientes = eliminacionesPendientes.joinToString(", ") { it.nombreAlimento }
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp),
+                    color = Color(0xFFFFF3CD)
+                ) {
+                    Text(
+                        text = "⏳ Eliminaciones pendientes de sincronizar en la nube (${eliminacionesPendientes.size}): $nombresPendientes. Puedes reintentar en Mi Perfil.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFF856404),
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.height(10.dp))
+            }
+
             Text(
                 text = "Alimentos disponibles",
                 style = MaterialTheme.typography.titleMedium,
@@ -335,7 +536,8 @@ fun MiDespensaScreen(
                     items(alimentos, key = { it.id }) { alimento ->
                         AlimentoCard(
                             alimento = alimento,
-                            onEliminar = { viewModel.eliminar(alimento.id) },
+                            pendienteDeSubir = alimento.pendienteSincronizacion || (alimento.remoteId in remoteIdsPendientes),
+                            onEliminar = { alimentoAEliminar = alimento },
                             onEditar = { abrirEdicion(alimento) },
                             onConsumir = {
                                 dialogAlimento = alimento
@@ -367,6 +569,7 @@ fun MiDespensaScreen(
 @Composable
 private fun AlimentoCard(
     alimento: Alimento,
+    pendienteDeSubir: Boolean = false,
     onEliminar: () -> Unit,
     onEditar: () -> Unit,
     onConsumir: () -> Unit,
@@ -389,11 +592,28 @@ private fun AlimentoCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = alimento.nombre,
-                        style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = FontWeight.SemiBold
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = alimento.nombre,
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        if (pendienteDeSubir) {
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = Color(0xFFFFF3CD)
+                            ) {
+                                Text(
+                                    text = "PENDIENTE DE SINCRONIZAR",
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF856404)
+                                )
+                            }
+                        }
+                    }
                     if (alimento.categoria.isNotBlank()) {
                         Text(
                             text = alimento.categoria,

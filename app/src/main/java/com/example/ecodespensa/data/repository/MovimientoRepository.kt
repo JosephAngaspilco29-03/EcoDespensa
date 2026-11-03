@@ -8,5 +8,7 @@ import kotlinx.coroutines.flow.Flow
  */
 interface MovimientoRepository {
     fun obtenerMovimientos(): Flow<List<Movimiento>>
+    fun obtenerMovimientosPorUsuario(usuarioUid: String): Flow<List<Movimiento>>
     suspend fun registrarMovimiento(movimiento: Movimiento)
+    suspend fun registrarMovimiento(movimiento: Movimiento, usuarioUid: String)
 }

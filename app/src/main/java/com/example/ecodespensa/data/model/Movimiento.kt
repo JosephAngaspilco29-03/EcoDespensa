@@ -26,5 +26,6 @@ data class Movimiento(
     val alimentoNombre: String,   // desnormalizado para mostrar en historial sin JOIN
     val tipo: TipoMovimiento,
     val cantidad: Double,
-    val fecha: String             // ISO-8601: yyyy-MM-dd HH:mm
+    val fecha: String,            // ISO-8601: yyyy-MM-dd HH:mm
+    val usuarioUid: String = ""
 )

@@ -67,4 +67,12 @@ object NotificationHelper {
             // El usuario no otorgó el permiso POST_NOTIFICATIONS
         }
     }
+
+    /**
+     * Cancela todas las notificaciones activas de la aplicación.
+     * Se utiliza al cerrar sesión o cambiar de usuario para evitar mostrar alertas de otra cuenta.
+     */
+    fun cancelarTodas(context: Context) {
+        NotificationManagerCompat.from(context).cancelAll()
+    }
 }

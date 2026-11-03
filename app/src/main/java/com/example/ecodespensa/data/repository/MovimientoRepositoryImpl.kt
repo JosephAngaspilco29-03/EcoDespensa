@@ -14,7 +14,14 @@ class MovimientoRepositoryImpl(
 
     override fun obtenerMovimientos(): Flow<List<Movimiento>> = dao.obtenerTodos()
 
+    override fun obtenerMovimientosPorUsuario(usuarioUid: String): Flow<List<Movimiento>> =
+        dao.obtenerPorUsuario(usuarioUid)
+
     override suspend fun registrarMovimiento(movimiento: Movimiento) {
         dao.insertar(movimiento)
+    }
+
+    override suspend fun registrarMovimiento(movimiento: Movimiento, usuarioUid: String) {
+        dao.insertar(movimiento.copy(usuarioUid = usuarioUid))
     }
 }

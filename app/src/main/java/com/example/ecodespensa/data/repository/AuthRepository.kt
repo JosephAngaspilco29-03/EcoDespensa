@@ -3,11 +3,16 @@ package com.example.ecodespensa.data.repository
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.userProfileChangeRequest
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.tasks.await
 
 /**
  * Repositorio que encapsula todas las operaciones de Firebase Authentication.
- * Expone funciones suspendidas para registro, inicio de sesión y cierre de sesión.
+ * Expone funciones suspendidas para registro, inicio de sesión y cierre de sesión,
+ * así como un flujo reactivo del UID autenticado.
  */
 class AuthRepository {
 
@@ -20,6 +25,20 @@ class AuthRepository {
     /** true si hay una sesión activa (sesión persistente automática de Firebase). */
     val haySesionActiva: Boolean
         get() = auth.currentUser != null
+
+    /**
+     * Flujo reactivo que emite el UID del usuario autenticado al iniciar sesión
+     * y `null` al cerrar sesión, liberando el [FirebaseAuth.AuthStateListener] al cerrarse.
+     */
+    val uidActualFlow: Flow<String?> = callbackFlow {
+        val listener = FirebaseAuth.AuthStateListener { firebaseAuth ->
+            trySend(firebaseAuth.currentUser?.uid)
+        }
+        auth.addAuthStateListener(listener)
+        awaitClose {
+            auth.removeAuthStateListener(listener)
+        }
+    }.distinctUntilChanged()
 
     /**
      * Registra un nuevo usuario con correo y contraseña.
