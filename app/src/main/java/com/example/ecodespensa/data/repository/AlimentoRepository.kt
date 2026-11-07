@@ -1,8 +1,10 @@
 package com.example.ecodespensa.data.repository
 
+import com.example.ecodespensa.data.local.ResultadoOperacionStock
 import com.example.ecodespensa.data.model.Alimento
 import com.example.ecodespensa.data.model.AlimentoFirestore
 import com.example.ecodespensa.data.model.EliminacionPendiente
+import com.example.ecodespensa.data.model.Movimiento
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -18,8 +20,8 @@ interface AlimentoRepository {
     fun obtenerAlimentos(): Flow<List<Alimento>>
     /** Agrega un alimento y registra automáticamente un movimiento COMPRA (operación atómica). */
     suspend fun agregarAlimento(alimento: Alimento)
-    /** Registra alimento + movimiento COMPRA en una única transacción Room. */
-    suspend fun agregarAlimentoConCompra(alimento: Alimento)
+    /** Registra alimento + movimiento COMPRA en una única transacción Room y devuelve el [Movimiento] creado. */
+    suspend fun agregarAlimentoConCompra(alimento: Alimento): Movimiento
     /** Actualiza el alimento y registra un movimiento AJUSTE en una única transacción Room. */
     suspend fun ajustarStock(alimento: Alimento, cantidadAjuste: Double)
     suspend fun actualizarAlimento(alimento: Alimento)
@@ -40,22 +42,22 @@ interface AlimentoRepository {
     /** Inserta el alimento asociándolo a [usuarioUid]. */
     suspend fun agregarAlimento(alimento: Alimento, usuarioUid: String)
 
-    /** Registra alimento + movimiento COMPRA asociados a [usuarioUid] en una transacción. */
-    suspend fun agregarAlimentoConCompra(alimento: Alimento, usuarioUid: String)
+    /** Registra alimento + movimiento COMPRA asociados a [usuarioUid] en una transacción y devuelve el [Movimiento] COMPRA. */
+    suspend fun agregarAlimentoConCompra(alimento: Alimento, usuarioUid: String): Movimiento
 
     /**
      * Ajusta el stock en una única transacción Room verificando que el alimento pertenezca a [usuarioUid],
      * que [cantidadAjuste] sea mayor a 0 y que el stock resultante no sea negativo,
      * marcando `pendienteSincronizacion = true` y [marcaActualizacion], y registrando el movimiento AJUSTE.
      *
-     * @return El [Alimento] actualizado en Room, o `null` si la validación falla.
+     * @return El [ResultadoOperacionStock] con el alimento actualizado y su movimiento AJUSTE, o `null` si falla.
      */
     suspend fun ajustarStock(
         alimento: Alimento,
         cantidadAjuste: Double,
         usuarioUid: String,
         marcaActualizacion: Long = System.currentTimeMillis()
-    ): Alimento?
+    ): ResultadoOperacionStock?
 
     /** Actualiza el alimento verificando que pertenezca a [usuarioUid]. */
     suspend fun actualizarAlimentoPorUsuario(alimento: Alimento, usuarioUid: String)
@@ -63,9 +65,13 @@ interface AlimentoRepository {
     /**
      * Edita el alimento verificando que pertenezca a [usuarioUid], conserva su `remoteId`,
      * lo marca como pendiente de sincronización en Room y registra AJUSTE si cambió la cantidad.
-     * @return `true` si el alimento pertenecía al usuario y fue actualizado en Room.
+     * @return El [ResultadoOperacionStock] con el alimento editado y el movimiento AJUSTE opcional, o `null` si falla.
      */
-    suspend fun editarAlimento(alimento: Alimento, cantidadAnterior: Double, usuarioUid: String): Boolean
+    suspend fun editarAlimento(
+        alimento: Alimento,
+        cantidadAnterior: Double,
+        usuarioUid: String
+    ): ResultadoOperacionStock?
 
     /**
      * Registra un consumo en una única transacción Room:
@@ -73,14 +79,14 @@ interface AlimentoRepository {
      * que no supere el stock disponible, marca `pendienteSincronizacion = true` y [marcaActualizacion],
      * e inserta el movimiento CONSUMO en el historial local.
      *
-     * @return El [Alimento] actualizado en Room, o `null` si la validación falla.
+     * @return El [ResultadoOperacionStock] con el alimento actualizado y su movimiento CONSUMO, o `null` si falla.
      */
     suspend fun consumirAlimento(
         alimentoId: Int,
         cantidad: Double,
         usuarioUid: String,
         marcaActualizacion: Long = System.currentTimeMillis()
-    ): Alimento?
+    ): ResultadoOperacionStock?
 
     /**
      * Registra un desperdicio en una única transacción Room:
@@ -88,14 +94,14 @@ interface AlimentoRepository {
      * que sea mayor a 0 y no supere el stock disponible, marca `pendienteSincronizacion = true`
      * y [marcaActualizacion], e inserta el movimiento DESPERDICIO en el historial local.
      *
-     * @return El [Alimento] actualizado en Room, o `null` si la validación falla.
+     * @return El [ResultadoOperacionStock] con el alimento actualizado y su movimiento DESPERDICIO, o `null` si falla.
      */
     suspend fun desperdiciarAlimento(
         alimentoId: Int,
         cantidad: Double,
         usuarioUid: String,
         marcaActualizacion: Long = System.currentTimeMillis()
-    ): Alimento?
+    ): ResultadoOperacionStock?
 
     /**
      * Marca en Room que el alimento con [remoteId] perteneciente a [usuarioUid]

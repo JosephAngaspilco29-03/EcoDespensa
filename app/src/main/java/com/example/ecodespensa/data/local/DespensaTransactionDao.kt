@@ -14,6 +14,15 @@ import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 
 /**
+ * Resultado atómico de una operación transaccional en Room que actualiza un [Alimento]
+ * y opcionalmente registra un [Movimiento] en el historial local (con su `remoteId` UUID persistente).
+ */
+data class ResultadoOperacionStock(
+    val alimentoActualizado: Alimento,
+    val movimientoRegistrado: Movimiento? = null
+)
+
+/**
  * DAO de operaciones transaccionales atómicas de EcoDespensa.
  * Al ser una clase abstracta de Room, puede tener métodos concretos anotados con @Transaction
  * que combinan múltiples operaciones DAO de forma atómica.
@@ -91,7 +100,7 @@ abstract class DespensaTransactionDao {
     ): Int
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    abstract suspend fun _insertarMovimiento(movimiento: Movimiento)
+    abstract suspend fun _insertarMovimiento(movimiento: Movimiento): Long
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     abstract suspend fun _insertarEliminacionPendiente(eliminacion: EliminacionPendiente): Long
@@ -125,11 +134,14 @@ abstract class DespensaTransactionDao {
 
     /**
      * Inserta el [alimento] y crea automáticamente un movimiento de tipo COMPRA
-     * con la cantidad inicial registrada y el mismo `usuarioUid` del alimento.
+     * con la cantidad inicial registrada, el mismo `usuarioUid` del alimento y un
+     * `remoteId` UUID único y persistente.
      * Todo ocurre dentro de una única transacción Room.
+     *
+     * @return El [Movimiento] de tipo COMPRA persistido en Room (con su `id` local y `remoteId` UUID).
      */
     @Transaction
-    open suspend fun insertarAlimentoConCompra(alimento: Alimento) {
+    open suspend fun insertarAlimentoConCompra(alimento: Alimento): Movimiento {
         val alimentoFinal = if (alimento.remoteId.isBlank()) {
             alimento.copy(remoteId = java.util.UUID.randomUUID().toString())
         } else {
@@ -137,21 +149,18 @@ abstract class DespensaTransactionDao {
         }
         val nuevoId = _insertarAlimento(alimentoFinal)
         val cantidad = parsearCantidad(alimentoFinal.cantidadActual)
-        _insertarMovimiento(
-            Movimiento(
-                alimentoId = nuevoId.toInt(),
-                alimentoNombre = alimentoFinal.nombre,
-                tipo = TipoMovimiento.COMPRA,
-                cantidad = cantidad,
-                fecha = fechaActual(),
-                usuarioUid = alimentoFinal.usuarioUid
-            )
+        return registrarMovimientoLocal(
+            alimentoId = nuevoId.toInt(),
+            alimentoNombre = alimentoFinal.nombre,
+            tipo = TipoMovimiento.COMPRA,
+            cantidad = cantidad,
+            usuarioUid = alimentoFinal.usuarioUid
         )
     }
 
     /**
      * Actualiza el [alimento] verificando su [usuarioUid], marca `pendienteSincronizacion = true`
-     * y `actualizadoEn`, y registra un movimiento AJUSTE con el mismo `usuarioUid`.
+     * y `actualizadoEn`, y registra un movimiento AJUSTE con el mismo `usuarioUid` y `remoteId` UUID.
      * [cantidadAjuste] es la cantidad que se incrementó (siempre positiva).
      * Impide stock negativo y conserva el `remoteId` original.
      * Todo ocurre dentro de una única transacción Room.
@@ -162,17 +171,137 @@ abstract class DespensaTransactionDao {
         cantidadAjuste: Double,
         usuarioUid: String = alimento.usuarioUid,
         marcaActualizacion: Long = System.currentTimeMillis()
-    ): Alimento? {
-        val uidLimpio = usuarioUid.trim()
-        if (uidLimpio.isEmpty() || cantidadAjuste <= 0.0) return null
+    ): ResultadoOperacionStock? = modificarStockConMovimiento(
+        alimentoId = alimento.id,
+        usuarioUid = usuarioUid,
+        deltaStock = cantidadAjuste,
+        cantidadMovimiento = cantidadAjuste,
+        tipoMovimiento = TipoMovimiento.AJUSTE,
+        marcaActualizacion = marcaActualizacion
+    )
 
-        val actual = _obtenerAlimentoPorIdYUsuario(alimento.id, uidLimpio) ?: return null
+    /**
+     * Actualiza los datos generales del [alimentoActualizado] verificando su [usuarioUid],
+     * conserva su `remoteId` original, lo marca como pendiente de sincronización en Room y,
+     * si la cantidad cambió respecto a [cantidadAnterior], registra
+     * automáticamente un movimiento AJUSTE con la diferencia, el mismo `usuarioUid` y su `remoteId` UUID.
+     * NO registra movimiento COMPRA. Impide stock negativo.
+     * Todo ocurre dentro de una única transacción Room.
+     */
+    @Transaction
+    open suspend fun editarAlimentoConAjuste(
+        alimentoActualizado: Alimento,
+        cantidadAnterior: Double,
+        usuarioUid: String = alimentoActualizado.usuarioUid
+    ): ResultadoOperacionStock? {
+        val uidLimpio = usuarioUid.trim()
+        if (uidLimpio.isEmpty()) return null
+
+        val cantidadNueva = parsearCantidad(alimentoActualizado.cantidadActual)
+        if (cantidadNueva < 0.0) return null
+
+        val marcaActualizacion = alimentoActualizado.actualizadoEn.takeIf { it > 0L }
+            ?: System.currentTimeMillis()
+        val filasActualizadas = _editarAlimentoMarcandoPendientePorUsuario(
+            id = alimentoActualizado.id,
+            usuarioUid = uidLimpio,
+            nombre = alimentoActualizado.nombre,
+            categoria = alimentoActualizado.categoria,
+            cantidadActual = alimentoActualizado.cantidadActual,
+            unidad = alimentoActualizado.unidad,
+            fechaCompra = alimentoActualizado.fechaCompra,
+            fechaVencimiento = alimentoActualizado.fechaVencimiento,
+            pendienteSincronizacion = true,
+            actualizadoEn = marcaActualizacion
+        )
+        if (filasActualizadas <= 0) return null
+
+        val diferencia = cantidadNueva - cantidadAnterior
+        val movimientoAjuste = if (diferencia != 0.0) {
+            registrarMovimientoLocal(
+                alimentoId = alimentoActualizado.id,
+                alimentoNombre = alimentoActualizado.nombre,
+                tipo = TipoMovimiento.AJUSTE,
+                cantidad = diferencia,
+                usuarioUid = uidLimpio
+            )
+        } else {
+            null
+        }
+
+        return ResultadoOperacionStock(
+            alimentoActualizado = alimentoActualizado.copy(
+                usuarioUid = uidLimpio,
+                pendienteSincronizacion = true,
+                actualizadoEn = marcaActualizacion
+            ),
+            movimientoRegistrado = movimientoAjuste
+        )
+    }
+
+    /**
+     * Registra el consumo de un alimento en una única transacción atómica de Room:
+     * actualiza `cantidadActual`, marca `pendienteSincronizacion = true` y [marcaActualizacion],
+     * e inserta el movimiento [TipoMovimiento.CONSUMO] con su `remoteId` UUID persistente.
+     */
+    @Transaction
+    open suspend fun consumirAlimentoConMovimiento(
+        alimentoId: Int,
+        cantidadConsumida: Double,
+        usuarioUid: String,
+        marcaActualizacion: Long = System.currentTimeMillis()
+    ): ResultadoOperacionStock? = modificarStockConMovimiento(
+        alimentoId = alimentoId,
+        usuarioUid = usuarioUid,
+        deltaStock = -cantidadConsumida,
+        cantidadMovimiento = cantidadConsumida,
+        tipoMovimiento = TipoMovimiento.CONSUMO,
+        marcaActualizacion = marcaActualizacion
+    )
+
+    /**
+     * Registra el desperdicio de un alimento en una única transacción atómica de Room:
+     * actualiza `cantidadActual`, marca `pendienteSincronizacion = true` y [marcaActualizacion],
+     * e inserta el movimiento [TipoMovimiento.DESPERDICIO] con su `remoteId` UUID persistente.
+     */
+    @Transaction
+    open suspend fun desperdiciarAlimentoConMovimiento(
+        alimentoId: Int,
+        cantidadDesperdiciada: Double,
+        usuarioUid: String,
+        marcaActualizacion: Long = System.currentTimeMillis()
+    ): ResultadoOperacionStock? = modificarStockConMovimiento(
+        alimentoId = alimentoId,
+        usuarioUid = usuarioUid,
+        deltaStock = -cantidadDesperdiciada,
+        cantidadMovimiento = cantidadDesperdiciada,
+        tipoMovimiento = TipoMovimiento.DESPERDICIO,
+        marcaActualizacion = marcaActualizacion
+    )
+
+    /**
+     * Lógica común reutilizada por CONSUMO, DESPERDICIO y AJUSTE dentro de una transacción Room:
+     * valida propietario, `remoteId` y límites de stock, actualiza el alimento marcando
+     * `pendienteSincronizacion = true` y registra el movimiento con su UUID persistente.
+     */
+    private suspend fun modificarStockConMovimiento(
+        alimentoId: Int,
+        usuarioUid: String,
+        deltaStock: Double,
+        cantidadMovimiento: Double,
+        tipoMovimiento: TipoMovimiento,
+        marcaActualizacion: Long
+    ): ResultadoOperacionStock? {
+        val uidLimpio = usuarioUid.trim()
+        if (uidLimpio.isEmpty() || cantidadMovimiento <= 0.0) return null
+
+        val actual = _obtenerAlimentoPorIdYUsuario(alimentoId, uidLimpio) ?: return null
         if (actual.usuarioUid.trim() != uidLimpio || actual.remoteId.isBlank()) return null
 
         val stockActual = parsearCantidad(actual.cantidadActual)
         if (stockActual < 0.0) return null
 
-        val nuevoStock = stockActual + cantidadAjuste
+        val nuevoStock = stockActual + deltaStock
         if (nuevoStock < 0.0) return null
 
         val nuevaCantidadTexto = formatearCantidad(nuevoStock)
@@ -191,197 +320,43 @@ abstract class DespensaTransactionDao {
         )
         if (filasActualizadas <= 0) return null
 
-        _insertarMovimiento(
-            Movimiento(
-                alimentoId = actual.id,
-                alimentoNombre = actual.nombre,
-                tipo = TipoMovimiento.AJUSTE,
-                cantidad = cantidadAjuste,
-                fecha = fechaActual(),
-                usuarioUid = uidLimpio
-            )
+        val movimiento = registrarMovimientoLocal(
+            alimentoId = actual.id,
+            alimentoNombre = actual.nombre,
+            tipo = tipoMovimiento,
+            cantidad = cantidadMovimiento,
+            usuarioUid = uidLimpio
         )
 
-        return actual.copy(
-            cantidadActual = nuevaCantidadTexto,
-            usuarioUid = uidLimpio,
-            pendienteSincronizacion = true,
-            actualizadoEn = marcaActualizacion
+        return ResultadoOperacionStock(
+            alimentoActualizado = actual.copy(
+                cantidadActual = nuevaCantidadTexto,
+                usuarioUid = uidLimpio,
+                pendienteSincronizacion = true,
+                actualizadoEn = marcaActualizacion
+            ),
+            movimientoRegistrado = movimiento
         )
     }
 
-    /**
-     * Actualiza los datos generales del [alimentoActualizado] verificando su [usuarioUid],
-     * conserva su `remoteId` original, lo marca como pendiente de sincronización en Room y,
-     * si la cantidad cambió respecto a [cantidadAnterior], registra
-     * automáticamente un movimiento AJUSTE con la diferencia y el mismo `usuarioUid`.
-     * NO registra movimiento COMPRA. Impide stock negativo.
-     * Todo ocurre dentro de una única transacción Room.
-     */
-    @Transaction
-    open suspend fun editarAlimentoConAjuste(
-        alimentoActualizado: Alimento,
-        cantidadAnterior: Double,
-        usuarioUid: String = alimentoActualizado.usuarioUid
-    ): Boolean {
-        val cantidadNueva = parsearCantidad(alimentoActualizado.cantidadActual)
-        if (cantidadNueva < 0.0) return false
-
-        val marcaActualizacion = alimentoActualizado.actualizadoEn.takeIf { it > 0L }
-            ?: System.currentTimeMillis()
-        val filasActualizadas = _editarAlimentoMarcandoPendientePorUsuario(
-            id = alimentoActualizado.id,
+    private suspend fun registrarMovimientoLocal(
+        alimentoId: Int,
+        alimentoNombre: String,
+        tipo: TipoMovimiento,
+        cantidad: Double,
+        usuarioUid: String
+    ): Movimiento {
+        val movimiento = Movimiento(
+            alimentoId = alimentoId,
+            alimentoNombre = alimentoNombre,
+            tipo = tipo,
+            cantidad = cantidad,
+            fecha = fechaActual(),
             usuarioUid = usuarioUid,
-            nombre = alimentoActualizado.nombre,
-            categoria = alimentoActualizado.categoria,
-            cantidadActual = alimentoActualizado.cantidadActual,
-            unidad = alimentoActualizado.unidad,
-            fechaCompra = alimentoActualizado.fechaCompra,
-            fechaVencimiento = alimentoActualizado.fechaVencimiento,
-            pendienteSincronizacion = true,
-            actualizadoEn = marcaActualizacion
+            remoteId = java.util.UUID.randomUUID().toString()
         )
-        if (filasActualizadas > 0) {
-            val diferencia = cantidadNueva - cantidadAnterior
-            if (diferencia != 0.0) {
-                _insertarMovimiento(
-                    Movimiento(
-                        alimentoId = alimentoActualizado.id,
-                        alimentoNombre = alimentoActualizado.nombre,
-                        tipo = TipoMovimiento.AJUSTE,
-                        cantidad = diferencia,
-                        fecha = fechaActual(),
-                        usuarioUid = usuarioUid
-                    )
-                )
-            }
-            return true
-        }
-        return false
-    }
-
-    /**
-     * Registra el consumo de un alimento en una única transacción atómica de Room (Etapa 4C.3C):
-     * 1. Verifica que el alimento exista y pertenezca a [usuarioUid], que tenga `remoteId` válido
-     *    y que [cantidadConsumida] sea mayor a 0 y no supere el stock actual.
-     * 2. Actualiza la cantidad local marcando `pendienteSincronizacion = true` y [marcaActualizacion],
-     *    conservando intactos su `remoteId` original y su `baseRemotaActualizadoEn`.
-     * 3. Registra el movimiento de tipo [TipoMovimiento.CONSUMO] en el historial local de Room.
-     *
-     * @return El [Alimento] con su cantidad y estado actualizados, o `null` si la operación no es válida.
-     */
-    @Transaction
-    open suspend fun consumirAlimentoConMovimiento(
-        alimentoId: Int,
-        cantidadConsumida: Double,
-        usuarioUid: String,
-        marcaActualizacion: Long = System.currentTimeMillis()
-    ): Alimento? {
-        val uidLimpio = usuarioUid.trim()
-        if (uidLimpio.isEmpty() || cantidadConsumida <= 0.0) return null
-
-        val actual = _obtenerAlimentoPorIdYUsuario(alimentoId, uidLimpio) ?: return null
-        if (actual.usuarioUid.trim() != uidLimpio || actual.remoteId.isBlank()) return null
-
-        val stockActual = parsearCantidad(actual.cantidadActual)
-        if (cantidadConsumida > stockActual) return null
-
-        val nuevoStock = stockActual - cantidadConsumida
-        val nuevaCantidadTexto = formatearCantidad(nuevoStock)
-
-        val filasActualizadas = _editarAlimentoMarcandoPendientePorUsuario(
-            id = actual.id,
-            usuarioUid = uidLimpio,
-            nombre = actual.nombre,
-            categoria = actual.categoria,
-            cantidadActual = nuevaCantidadTexto,
-            unidad = actual.unidad,
-            fechaCompra = actual.fechaCompra,
-            fechaVencimiento = actual.fechaVencimiento,
-            pendienteSincronizacion = true,
-            actualizadoEn = marcaActualizacion
-        )
-        if (filasActualizadas <= 0) return null
-
-        _insertarMovimiento(
-            Movimiento(
-                alimentoId = actual.id,
-                alimentoNombre = actual.nombre,
-                tipo = TipoMovimiento.CONSUMO,
-                cantidad = cantidadConsumida,
-                fecha = fechaActual(),
-                usuarioUid = uidLimpio
-            )
-        )
-
-        return actual.copy(
-            cantidadActual = nuevaCantidadTexto,
-            usuarioUid = uidLimpio,
-            pendienteSincronizacion = true,
-            actualizadoEn = marcaActualizacion
-        )
-    }
-
-    /**
-     * Registra el desperdicio de un alimento en una única transacción atómica de Room (Etapa 4C.3D):
-     * 1. Verifica que el alimento exista y pertenezca a [usuarioUid], que tenga `remoteId` válido
-     *    y que [cantidadDesperdiciada] sea mayor a 0 y no supere el stock disponible.
-     * 2. Actualiza la cantidad local marcando `pendienteSincronizacion = true` y [marcaActualizacion],
-     *    conservando intactos su `remoteId` original y su `baseRemotaActualizadoEn`.
-     * 3. Registra el movimiento de tipo [TipoMovimiento.DESPERDICIO] en el historial local de Room.
-     *
-     * @return El [Alimento] con su cantidad y estado actualizados, o `null` si la operación no es válida.
-     */
-    @Transaction
-    open suspend fun desperdiciarAlimentoConMovimiento(
-        alimentoId: Int,
-        cantidadDesperdiciada: Double,
-        usuarioUid: String,
-        marcaActualizacion: Long = System.currentTimeMillis()
-    ): Alimento? {
-        val uidLimpio = usuarioUid.trim()
-        if (uidLimpio.isEmpty() || cantidadDesperdiciada <= 0.0) return null
-
-        val actual = _obtenerAlimentoPorIdYUsuario(alimentoId, uidLimpio) ?: return null
-        if (actual.usuarioUid.trim() != uidLimpio || actual.remoteId.isBlank()) return null
-
-        val stockActual = parsearCantidad(actual.cantidadActual)
-        if (cantidadDesperdiciada > stockActual) return null
-
-        val nuevoStock = stockActual - cantidadDesperdiciada
-        val nuevaCantidadTexto = formatearCantidad(nuevoStock)
-
-        val filasActualizadas = _editarAlimentoMarcandoPendientePorUsuario(
-            id = actual.id,
-            usuarioUid = uidLimpio,
-            nombre = actual.nombre,
-            categoria = actual.categoria,
-            cantidadActual = nuevaCantidadTexto,
-            unidad = actual.unidad,
-            fechaCompra = actual.fechaCompra,
-            fechaVencimiento = actual.fechaVencimiento,
-            pendienteSincronizacion = true,
-            actualizadoEn = marcaActualizacion
-        )
-        if (filasActualizadas <= 0) return null
-
-        _insertarMovimiento(
-            Movimiento(
-                alimentoId = actual.id,
-                alimentoNombre = actual.nombre,
-                tipo = TipoMovimiento.DESPERDICIO,
-                cantidad = cantidadDesperdiciada,
-                fecha = fechaActual(),
-                usuarioUid = uidLimpio
-            )
-        )
-
-        return actual.copy(
-            cantidadActual = nuevaCantidadTexto,
-            usuarioUid = uidLimpio,
-            pendienteSincronizacion = true,
-            actualizadoEn = marcaActualizacion
-        )
+        val nuevoId = _insertarMovimiento(movimiento)
+        return movimiento.copy(id = nuevoId.toInt())
     }
 
     /**

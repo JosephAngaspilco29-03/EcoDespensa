@@ -23,12 +23,18 @@ import com.example.ecodespensa.ui.history.SubidaHistorialUiState
 import com.example.ecodespensa.ui.pantry.AlimentoViewModel
 import com.example.ecodespensa.ui.pantry.DescargaNubeUiState
 import com.example.ecodespensa.ui.pantry.SubidaNubeUiState
+import com.example.ecodespensa.ui.planner.DescargaPlanificadorUiState
+import com.example.ecodespensa.ui.planner.PlanificadorViewModel
+import com.example.ecodespensa.ui.planner.SubidaPlanificadorUiState
+import com.example.ecodespensa.ui.shopping.DescargaListaComprasUiState
+import com.example.ecodespensa.ui.shopping.ListaComprasViewModel
+import com.example.ecodespensa.ui.shopping.SubidaListaComprasUiState
 
 /**
  * Pantalla Mi Perfil.
  * Muestra nombre y correo del usuario autenticado en Firebase.
- * Incluye botón "Subir mi despensa a la nube", opción para vincular datos antiguos
- * sin propietario y botón para cerrar sesión.
+ * Incluye botones para sincronizar la despensa, el historial, el planificador semanal y la lista de compras con la nube,
+ * opción para vincular datos antiguos sin propietario y botón para cerrar sesión.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -37,7 +43,9 @@ fun MiPerfilScreen(
     onCerrarSesion: () -> Unit,
     authViewModel: AuthViewModel = viewModel(factory = AuthViewModel.Factory()),
     alimentoViewModel: AlimentoViewModel? = null,
-    movimientoViewModel: MovimientoViewModel? = null
+    movimientoViewModel: MovimientoViewModel? = null,
+    planificadorViewModel: PlanificadorViewModel? = null,
+    listaComprasViewModel: ListaComprasViewModel? = null
 ) {
     val usuario = authViewModel.usuarioActual
     val haySesionActiva = usuario?.uid?.isNotBlank() == true
@@ -91,6 +99,399 @@ fun MiPerfilScreen(
         ?.collectAsState()
         ?.value
         .orEmpty()
+
+    var mostrarConfirmacionSubidaPlanificador by remember { mutableStateOf(false) }
+    var mostrarConfirmacionDescargaPlanificador by remember { mutableStateOf(false) }
+
+    val subidaPlanificadorState = planificadorViewModel
+        ?.subidaPlanificadorState
+        ?.collectAsState()
+        ?.value ?: SubidaPlanificadorUiState.Idle
+
+    val descargaPlanificadorState = planificadorViewModel
+        ?.descargaPlanificadorState
+        ?.collectAsState()
+        ?.value ?: DescargaPlanificadorUiState.Idle
+
+    val totalPlanesCuenta = planificadorViewModel
+        ?.totalPlanesCuenta
+        ?.collectAsState()
+        ?.value ?: 0
+
+    val totalEliminacionesPlanCuenta = planificadorViewModel
+        ?.totalEliminacionesPlanCuenta
+        ?.collectAsState()
+        ?.value ?: 0
+
+    var mostrarConfirmacionSubidaListaCompras by remember { mutableStateOf(false) }
+    var mostrarConfirmacionDescargaListaCompras by remember { mutableStateOf(false) }
+
+    val subidaListaComprasState = listaComprasViewModel
+        ?.subidaListaComprasState
+        ?.collectAsState()
+        ?.value ?: SubidaListaComprasUiState.Idle
+
+    val descargaListaComprasState = listaComprasViewModel
+        ?.descargaListaComprasState
+        ?.collectAsState()
+        ?.value ?: DescargaListaComprasUiState.Idle
+
+    val itemsCompraCuenta = listaComprasViewModel
+        ?.itemsCompra
+        ?.collectAsState()
+        ?.value
+        .orEmpty()
+
+    val totalEliminacionesCompraCuenta = listaComprasViewModel
+        ?.totalEliminacionesCompraCuenta
+        ?.collectAsState()
+        ?.value ?: 0
+
+    // Confirmación antes de subir la lista de compras a Cloud Firestore
+    if (mostrarConfirmacionSubidaListaCompras) {
+        val pendientesCompra = itemsCompraCuenta.count { it.pendienteSincronizacion }
+        AlertDialog(
+            onDismissRequest = { mostrarConfirmacionSubidaListaCompras = false },
+            title = { Text("Subir mi lista de compras a la nube") },
+            text = {
+                Text(
+                    "Tienes ${itemsCompraCuenta.size} producto(s) en tu lista de compras" +
+                        (if (pendientesCompra > 0) " ($pendientesCompra cambio(s) pendiente(s))" else "") +
+                        (if (totalEliminacionesCompraCuenta > 0) " y $totalEliminacionesCompraCuenta eliminación(es) pendiente(s)" else "") +
+                        ".\n\n" +
+                        "• Se guardarán en Cloud Firestore conservando su identificador único.\n" +
+                        "• Se sincronizarán ediciones, productos marcados como comprados y eliminaciones verificando conflictos.\n" +
+                        "• No se modificará Mi Despensa ni se generarán movimientos de compra.\n\n" +
+                        "¿Deseas confirmar la subida?"
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        mostrarConfirmacionSubidaListaCompras = false
+                        if (!authViewModel.haySesionActiva || authViewModel.usuarioActual?.uid.isNullOrBlank()) {
+                            mensajeSinSesion = "No hay una sesión activa en Firebase. Inicia sesión primero."
+                        } else {
+                            listaComprasViewModel?.subirMiListaComprasALaNube()
+                        }
+                    }
+                ) { Text("Confirmar") }
+            },
+            dismissButton = {
+                TextButton(onClick = { mostrarConfirmacionSubidaListaCompras = false }) {
+                    Text("Cancelar")
+                }
+            }
+        )
+    }
+
+    // Confirmación antes de recuperar la lista de compras desde Cloud Firestore
+    if (mostrarConfirmacionDescargaListaCompras) {
+        AlertDialog(
+            onDismissRequest = { mostrarConfirmacionDescargaListaCompras = false },
+            title = { Text("Recuperar mi lista de compras de la nube") },
+            text = {
+                Text(
+                    "Se consultarán los productos de tu lista de compras en Cloud Firestore para tu cuenta actual.\n\n" +
+                        "• No se sobrescribirán productos locales con cambios pendientes de subir.\n" +
+                        "• Los productos eliminados o limpiados localmente no volverán a insertarse.\n" +
+                        "• Se evitarán duplicados comparando cada producto por su remoteId.\n" +
+                        "• No se modificará Mi Despensa ni se generarán movimientos de compra.\n\n" +
+                        "¿Deseas confirmar la recuperación?"
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        mostrarConfirmacionDescargaListaCompras = false
+                        if (!authViewModel.haySesionActiva || authViewModel.usuarioActual?.uid.isNullOrBlank()) {
+                            mensajeSinSesion = "No hay una sesión activa en Firebase. Inicia sesión primero."
+                        } else {
+                            listaComprasViewModel?.recuperarMiListaComprasDeLaNube()
+                        }
+                    }
+                ) { Text("Confirmar") }
+            },
+            dismissButton = {
+                TextButton(onClick = { mostrarConfirmacionDescargaListaCompras = false }) {
+                    Text("Cancelar")
+                }
+            }
+        )
+    }
+
+    // Resultado o error de la subida de la lista de compras
+    when (val estadoSubidaLC = subidaListaComprasState) {
+        is SubidaListaComprasUiState.Resultado -> {
+            val res = estadoSubidaLC.resumen
+            AlertDialog(
+                onDismissRequest = { listaComprasViewModel?.limpiarEstadoSubidaListaCompras() },
+                title = {
+                    Text(
+                        if (res.errores > 0 || res.conflictos > 0) "Subida de lista de compras con observaciones"
+                        else "Resultado de subida de lista de compras"
+                    )
+                },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Operaciones evaluadas: ${res.total}")
+                        Text("• Subidos / actualizados: ${res.subidos}")
+                        Text("• Eliminaciones sincronizadas: ${res.eliminados}")
+                        Text("• Omitidos (ya existían sin cambios): ${res.omitidos}")
+                        Text("• Conflictos detectados: ${res.conflictos}")
+                        Text("• Errores: ${res.errores}")
+                        if ((res.errores > 0 || res.conflictos > 0) && !res.detalleError.isNullOrBlank()) {
+                            Text(
+                                text = "Detalle: ${res.detalleError}",
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { listaComprasViewModel?.limpiarEstadoSubidaListaCompras() }) {
+                        Text("Aceptar")
+                    }
+                }
+            )
+        }
+        is SubidaListaComprasUiState.ErrorBloqueante -> {
+            AlertDialog(
+                onDismissRequest = { listaComprasViewModel?.limpiarEstadoSubidaListaCompras() },
+                title = { Text("No se pudo subir la lista de compras") },
+                text = { Text(estadoSubidaLC.mensaje) },
+                confirmButton = {
+                    TextButton(onClick = { listaComprasViewModel?.limpiarEstadoSubidaListaCompras() }) {
+                        Text("Aceptar")
+                    }
+                }
+            )
+        }
+        else -> Unit
+    }
+
+    // Resultado o error de la recuperación de la lista de compras
+    when (val estadoDescargaLC = descargaListaComprasState) {
+        is DescargaListaComprasUiState.Resultado -> {
+            val res = estadoDescargaLC.resumen
+            AlertDialog(
+                onDismissRequest = { listaComprasViewModel?.limpiarEstadoDescargaListaCompras() },
+                title = {
+                    Text(
+                        if (res.errores > 0 || res.conflictos > 0) "Recuperación de lista de compras con observaciones"
+                        else "Resultado de recuperación de lista de compras"
+                    )
+                },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Productos encontrados en tu nube: ${res.totalRemotos}")
+                        Text("• Descargados / actualizados: ${res.descargados}")
+                        Text("• Omitidos (ya existían o eliminados localmente): ${res.omitidos}")
+                        Text("• Conflictos (cambios locales protegidos): ${res.conflictos}")
+                        Text("• Errores: ${res.errores}")
+                        if ((res.errores > 0 || res.conflictos > 0) && !res.detalleError.isNullOrBlank()) {
+                            Text(
+                                text = "Detalle: ${res.detalleError}",
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { listaComprasViewModel?.limpiarEstadoDescargaListaCompras() }) {
+                        Text("Aceptar")
+                    }
+                }
+            )
+        }
+        is DescargaListaComprasUiState.ErrorBloqueante -> {
+            AlertDialog(
+                onDismissRequest = { listaComprasViewModel?.limpiarEstadoDescargaListaCompras() },
+                title = { Text("No se pudo recuperar la lista de compras") },
+                text = { Text(estadoDescargaLC.mensaje) },
+                confirmButton = {
+                    TextButton(onClick = { listaComprasViewModel?.limpiarEstadoDescargaListaCompras() }) {
+                        Text("Aceptar")
+                    }
+                }
+            )
+        }
+        else -> Unit
+    }
+
+    // Confirmación antes de subir el planificador semanal a Cloud Firestore
+    if (mostrarConfirmacionSubidaPlanificador) {
+        AlertDialog(
+            onDismissRequest = { mostrarConfirmacionSubidaPlanificador = false },
+            title = { Text("Subir mi planificador a la nube") },
+            text = {
+                Text(
+                    "Tienes $totalPlanesCuenta comida(s) planificada(s)" +
+                        (if (totalEliminacionesPlanCuenta > 0) " y $totalEliminacionesPlanCuenta eliminación(es) pendiente(s)" else "") +
+                        " en tu cuenta actual.\n\n" +
+                        "• Se guardarán en Cloud Firestore junto con sus ingredientes y cantidades.\n" +
+                        "• Se sincronizarán las ediciones y eliminaciones pendientes verificando conflictos.\n" +
+                        "• No se descontará stock ni se generarán movimientos.\n\n" +
+                        "¿Deseas confirmar la subida?"
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        mostrarConfirmacionSubidaPlanificador = false
+                        if (!authViewModel.haySesionActiva || authViewModel.usuarioActual?.uid.isNullOrBlank()) {
+                            mensajeSinSesion = "No hay una sesión activa en Firebase. Inicia sesión primero."
+                        } else {
+                            planificadorViewModel?.subirMiPlanificadorALaNube()
+                        }
+                    }
+                ) { Text("Confirmar") }
+            },
+            dismissButton = {
+                TextButton(onClick = { mostrarConfirmacionSubidaPlanificador = false }) {
+                    Text("Cancelar")
+                }
+            }
+        )
+    }
+
+    // Confirmación antes de recuperar el planificador semanal desde Cloud Firestore
+    if (mostrarConfirmacionDescargaPlanificador) {
+        AlertDialog(
+            onDismissRequest = { mostrarConfirmacionDescargaPlanificador = false },
+            title = { Text("Recuperar mi planificador de la nube") },
+            text = {
+                Text(
+                    "Se consultarán las comidas planificadas en Cloud Firestore para tu cuenta actual.\n\n" +
+                        "• No se sobrescribirán planes locales con cambios pendientes de subir.\n" +
+                        "• Los planes eliminados localmente no volverán a insertarse.\n" +
+                        "• No se duplicarán comidas en la misma semana, día y tipo.\n" +
+                        "• No se descontará stock ni se generarán movimientos.\n\n" +
+                        "¿Deseas confirmar la recuperación?"
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        mostrarConfirmacionDescargaPlanificador = false
+                        if (!authViewModel.haySesionActiva || authViewModel.usuarioActual?.uid.isNullOrBlank()) {
+                            mensajeSinSesion = "No hay una sesión activa en Firebase. Inicia sesión primero."
+                        } else {
+                            planificadorViewModel?.recuperarMiPlanificadorDeLaNube()
+                        }
+                    }
+                ) { Text("Confirmar") }
+            },
+            dismissButton = {
+                TextButton(onClick = { mostrarConfirmacionDescargaPlanificador = false }) {
+                    Text("Cancelar")
+                }
+            }
+        )
+    }
+
+    // Resultado o error de la subida del planificador semanal
+    when (val estadoSubidaP = subidaPlanificadorState) {
+        is SubidaPlanificadorUiState.Resultado -> {
+            val res = estadoSubidaP.resumen
+            AlertDialog(
+                onDismissRequest = { planificadorViewModel?.limpiarEstadoSubidaPlanificador() },
+                title = {
+                    Text(
+                        if (res.errores > 0 || res.conflictos > 0) "Subida de planificador con observaciones"
+                        else "Resultado de subida del planificador"
+                    )
+                },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Operaciones evaluadas: ${res.total}")
+                        Text("• Subidos / actualizados: ${res.subidos}")
+                        Text("• Eliminaciones sincronizadas: ${res.eliminados}")
+                        Text("• Omitidos (ya existían sin cambios): ${res.omitidos}")
+                        Text("• Conflictos detectados: ${res.conflictos}")
+                        Text("• Errores: ${res.errores}")
+                        if ((res.errores > 0 || res.conflictos > 0) && !res.detalleError.isNullOrBlank()) {
+                            Text(
+                                text = "Detalle: ${res.detalleError}",
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { planificadorViewModel?.limpiarEstadoSubidaPlanificador() }) {
+                        Text("Aceptar")
+                    }
+                }
+            )
+        }
+        is SubidaPlanificadorUiState.ErrorBloqueante -> {
+            AlertDialog(
+                onDismissRequest = { planificadorViewModel?.limpiarEstadoSubidaPlanificador() },
+                title = { Text("No se pudo subir el planificador") },
+                text = { Text(estadoSubidaP.mensaje) },
+                confirmButton = {
+                    TextButton(onClick = { planificadorViewModel?.limpiarEstadoSubidaPlanificador() }) {
+                        Text("Aceptar")
+                    }
+                }
+            )
+        }
+        else -> Unit
+    }
+
+    // Resultado o error de la recuperación del planificador semanal
+    when (val estadoDescargaP = descargaPlanificadorState) {
+        is DescargaPlanificadorUiState.Resultado -> {
+            val res = estadoDescargaP.resumen
+            AlertDialog(
+                onDismissRequest = { planificadorViewModel?.limpiarEstadoDescargaPlanificador() },
+                title = {
+                    Text(
+                        if (res.errores > 0 || res.conflictos > 0) "Recuperación de planificador con observaciones"
+                        else "Resultado de recuperación del planificador"
+                    )
+                },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Planes encontrados en tu nube: ${res.totalRemotos}")
+                        Text("• Descargados / actualizados: ${res.descargados}")
+                        Text("• Omitidos (ya existían o eliminados localmente): ${res.omitidos}")
+                        Text("• Conflictos (cambios locales protegidos): ${res.conflictos}")
+                        Text("• Errores: ${res.errores}")
+                        if ((res.errores > 0 || res.conflictos > 0) && !res.detalleError.isNullOrBlank()) {
+                            Text(
+                                text = "Detalle: ${res.detalleError}",
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { planificadorViewModel?.limpiarEstadoDescargaPlanificador() }) {
+                        Text("Aceptar")
+                    }
+                }
+            )
+        }
+        is DescargaPlanificadorUiState.ErrorBloqueante -> {
+            AlertDialog(
+                onDismissRequest = { planificadorViewModel?.limpiarEstadoDescargaPlanificador() },
+                title = { Text("No se pudo recuperar el planificador") },
+                text = { Text(estadoDescargaP.mensaje) },
+                confirmButton = {
+                    TextButton(onClick = { planificadorViewModel?.limpiarEstadoDescargaPlanificador() }) {
+                        Text("Aceptar")
+                    }
+                }
+            )
+        }
+        else -> Unit
+    }
 
     // Confirmación antes de recuperar el historial desde la nube
     if (mostrarConfirmacionDescargaHistorial) {
@@ -632,7 +1033,67 @@ fun MiPerfilScreen(
                 subidaState is SubidaNubeUiState.Subiendo ||
                     descargaState is DescargaNubeUiState.Descargando ||
                     historialState is SubidaHistorialUiState.Subiendo ||
-                    descargaHistorialState is DescargaHistorialUiState.Descargando
+                    descargaHistorialState is DescargaHistorialUiState.Descargando ||
+                    subidaPlanificadorState is SubidaPlanificadorUiState.Subiendo ||
+                    descargaPlanificadorState is DescargaPlanificadorUiState.Descargando ||
+                    subidaListaComprasState is SubidaListaComprasUiState.Subiendo ||
+                    descargaListaComprasState is DescargaListaComprasUiState.Descargando
+
+            if (subidaListaComprasState is SubidaListaComprasUiState.Subiendo) {
+                val progresoLC = if (subidaListaComprasState.total > 0) {
+                    subidaListaComprasState.procesados.toFloat() / subidaListaComprasState.total.toFloat()
+                } else 0f
+                LinearProgressIndicator(
+                    progress = { progresoLC },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "Subiendo lista de compras (${subidaListaComprasState.procesados}/${subidaListaComprasState.total})...",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+            }
+
+            if (descargaListaComprasState is DescargaListaComprasUiState.Descargando) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "Recuperando lista de compras desde la nube...",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+            }
+
+            if (subidaPlanificadorState is SubidaPlanificadorUiState.Subiendo) {
+                val progresoP = if (subidaPlanificadorState.total > 0) {
+                    subidaPlanificadorState.procesados.toFloat() / subidaPlanificadorState.total.toFloat()
+                } else 0f
+                LinearProgressIndicator(
+                    progress = { progresoP },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "Subiendo planificador (${subidaPlanificadorState.procesados}/${subidaPlanificadorState.total})...",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+            }
+
+            if (descargaPlanificadorState is DescargaPlanificadorUiState.Descargando) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "Recuperando planificador desde la nube...",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+            }
 
             if (historialState is SubidaHistorialUiState.Subiendo) {
                 val progresoH = if (historialState.total > 0) {
@@ -761,6 +1222,98 @@ fun MiPerfilScreen(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text("Recuperar mi historial de la nube")
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Botón manual de subida del planificador semanal a Cloud Firestore
+            OutlinedButton(
+                onClick = {
+                    if (!haySesionActiva || authViewModel.usuarioActual?.uid.isNullOrBlank()) {
+                        mensajeSinSesion = "No hay una sesión activa. Inicia sesión para subir tu planificador."
+                    } else {
+                        mostrarConfirmacionSubidaPlanificador = true
+                    }
+                },
+                enabled = !operacionNubeEnCurso && planificadorViewModel != null,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(
+                    imageVector = Icons.Default.CloudUpload,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Subir mi planificador a la nube")
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Botón manual de recuperación del planificador semanal desde Cloud Firestore
+            OutlinedButton(
+                onClick = {
+                    if (!haySesionActiva || authViewModel.usuarioActual?.uid.isNullOrBlank()) {
+                        mensajeSinSesion = "No hay una sesión activa. Inicia sesión para recuperar tu planificador."
+                    } else {
+                        mostrarConfirmacionDescargaPlanificador = true
+                    }
+                },
+                enabled = !operacionNubeEnCurso && planificadorViewModel != null,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(
+                    imageVector = Icons.Default.CloudDownload,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Recuperar mi planificador de la nube")
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Botón manual de subida de la lista de compras a Cloud Firestore
+            OutlinedButton(
+                onClick = {
+                    if (!haySesionActiva || authViewModel.usuarioActual?.uid.isNullOrBlank()) {
+                        mensajeSinSesion = "No hay una sesión activa. Inicia sesión para subir tu lista de compras."
+                    } else {
+                        mostrarConfirmacionSubidaListaCompras = true
+                    }
+                },
+                enabled = !operacionNubeEnCurso && listaComprasViewModel != null,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(
+                    imageVector = Icons.Default.CloudUpload,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Subir mi lista de compras a la nube")
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Botón manual de recuperación de la lista de compras desde Cloud Firestore
+            OutlinedButton(
+                onClick = {
+                    if (!haySesionActiva || authViewModel.usuarioActual?.uid.isNullOrBlank()) {
+                        mensajeSinSesion = "No hay una sesión activa. Inicia sesión para recuperar tu lista de compras."
+                    } else {
+                        mostrarConfirmacionDescargaListaCompras = true
+                    }
+                },
+                enabled = !operacionNubeEnCurso && listaComprasViewModel != null,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(
+                    imageVector = Icons.Default.CloudDownload,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Recuperar mi lista de compras de la nube")
             }
 
             Spacer(modifier = Modifier.height(12.dp))

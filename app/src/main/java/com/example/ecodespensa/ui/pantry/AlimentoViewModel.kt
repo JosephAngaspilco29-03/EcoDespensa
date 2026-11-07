@@ -3,6 +3,7 @@ package com.example.ecodespensa.ui.pantry
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.example.ecodespensa.data.local.ResultadoOperacionStock
 import com.example.ecodespensa.data.model.Alimento
 import com.example.ecodespensa.data.model.EliminacionPendiente
 import com.example.ecodespensa.data.model.EstadoVencimiento
@@ -14,6 +15,7 @@ import com.example.ecodespensa.data.repository.EstadoSincronizacionEdicion
 import com.example.ecodespensa.data.repository.EstadoSincronizacionEliminacion
 import com.example.ecodespensa.data.repository.EstadoSubidaAlimento
 import com.example.ecodespensa.data.repository.FirestoreAlimentoRepository
+import com.example.ecodespensa.data.repository.FirestoreMovimientoRepository
 import com.example.ecodespensa.data.repository.MovimientoRepository
 import com.example.ecodespensa.data.repository.ResultadoDescargaDespensa
 import com.example.ecodespensa.data.repository.ResultadoSubidaDespensa
@@ -114,7 +116,8 @@ class AlimentoViewModel(
     private val repository: AlimentoRepository,
     private val movimientoRepository: MovimientoRepository,
     private val authRepository: AuthRepository = AuthRepository(),
-    private val firestoreAlimentoRepository: FirestoreAlimentoRepository = FirestoreAlimentoRepository()
+    private val firestoreAlimentoRepository: FirestoreAlimentoRepository = FirestoreAlimentoRepository(),
+    private val firestoreMovimientoRepository: FirestoreMovimientoRepository = FirestoreMovimientoRepository()
 ) : ViewModel() {
 
     private val _vinculandoDatos = MutableStateFlow(false)
@@ -300,10 +303,15 @@ class AlimentoViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
 
     /**
-     * Agrega el alimento nuevo:
-     * 1. Lo guarda primero en Room con su `remoteId` persistente, `usuarioUid` y `pendienteSincronizacion = true`, junto con su movimiento COMPRA.
-     * 2. Intenta subirlo automáticamente a `usuarios/{uid}/alimentos/{remoteId}` sin sobrescribir si ya existe.
-     * 3. Si se confirma en Firestore, limpia `pendienteSincronizacion` en Room; si no hay Internet, conserva el estado pendiente persistido en Room.
+     * Agrega el alimento nuevo (Etapa 4C.3A + Etapa 4D.3A):
+     * 1. Ejecuta la transacción Room actual que guarda el alimento (con su `remoteId` persistente,
+     *    `usuarioUid` y `pendienteSincronizacion = true`) y su movimiento `COMPRA` (con su propio
+     *    `remoteId` UUID persistente).
+     * 2. Tras confirmar la transacción local, verifica que el UID corresponda al usuario autenticado.
+     * 3. Sube automáticamente el alimento a `usuarios/{uid}/alimentos/{remoteId}` y el movimiento
+     *    `COMPRA` a `usuarios/{uid}/movimientos/{remoteId}` sin generar nuevos UUIDs ni duplicados.
+     * 4. Si no hay Internet, conserva el alimento y el movimiento `COMPRA` en Room para poder
+     *    subirlos después desde Mi Perfil ("Subir mi despensa a la nube" / "Subir mi historial a la nube").
      */
     fun agregar(alimento: Alimento) {
         val uid = obtenerUidActivo() ?: return
@@ -320,16 +328,19 @@ class AlimentoViewModel(
         )
 
         viewModelScope.launch {
-            // 1. Guardar primero en Room (fuente de verdad local, marcado pendiente hasta confirmar nube)
-            repository.agregarAlimentoConCompra(alimentoNuevo, uid)
+            // 1. Transacción atómica en Room: guardar alimento + movimiento COMPRA con su UUID persistente
+            val movimientoCompra = repository.agregarAlimentoConCompra(alimentoNuevo, uid)
 
             // 2. Verificar que la sesión siga activa con el mismo UID antes de subir a Firestore
             val uidVerificado = obtenerUidActivo()
-            if (uidVerificado == null || uidVerificado != uid) {
+            if (uidVerificado == null ||
+                uidVerificado != uid ||
+                movimientoCompra.usuarioUid.trim() != uidVerificado
+            ) {
                 _sincronizacionCreacionState.value =
                     SincronizacionCreacionUiState.PendienteDeSubir(
                         nombreAlimento = alimentoNuevo.nombre,
-                        mensaje = "⚠ '${alimentoNuevo.nombre}' se guardó en Room y quedó pendiente de sincronizar."
+                        mensaje = "⚠ '${alimentoNuevo.nombre}' y su compra se guardaron en Room y quedaron pendientes de sincronizar."
                     )
                 return@launch
             }
@@ -337,29 +348,44 @@ class AlimentoViewModel(
             _sincronizacionCreacionState.value =
                 SincronizacionCreacionUiState.SubiendoNuevo(
                     nombreAlimento = alimentoNuevo.nombre,
-                    mensaje = "Guardado en Room. Subiendo '${alimentoNuevo.nombre}' a la nube..."
+                    mensaje = "Guardado en Room. Subiendo '${alimentoNuevo.nombre}' y su movimiento COMPRA a la nube..."
                 )
 
-            // 3. Intentar subir a Cloud Firestore usando su remoteId persistente
-            val resultado = firestoreAlimentoRepository.subirAlimentoSiNoExiste(uidVerificado, alimentoNuevo)
-            resultado.fold(
+            // 3. Intentar subir el alimento a usuarios/{uid}/alimentos/{remoteId}
+            val resultadoAlimento =
+                firestoreAlimentoRepository.subirAlimentoSiNoExiste(uidVerificado, alimentoNuevo)
+
+            // 4. Intentar subir automáticamente el movimiento COMPRA a usuarios/{uid}/movimientos/{remoteId}
+            //    usando su UUID persistente y reutilizando FirestoreMovimientoRepository (sin duplicados)
+            val resultadoMovimiento =
+                firestoreMovimientoRepository.subirMovimientoSiNoExiste(uidVerificado, movimientoCompra)
+
+            resultadoAlimento.fold(
                 onSuccess = {
                     repository.marcarAlimentoSincronizado(
                         remoteId = remoteIdPersistente,
                         usuarioUid = uidVerificado,
                         actualizadoEnConfirmado = ahora
                     )
-                    _sincronizacionCreacionState.value =
-                        SincronizacionCreacionUiState.Sincronizado(
-                            nombreAlimento = alimentoNuevo.nombre,
-                            mensaje = "✓ '${alimentoNuevo.nombre}' guardado en Room y subido a la nube."
-                        )
+                    if (resultadoMovimiento.isSuccess) {
+                        _sincronizacionCreacionState.value =
+                            SincronizacionCreacionUiState.Sincronizado(
+                                nombreAlimento = alimentoNuevo.nombre,
+                                mensaje = "✓ '${alimentoNuevo.nombre}' y su movimiento COMPRA guardados en Room y subidos a la nube."
+                            )
+                    } else {
+                        _sincronizacionCreacionState.value =
+                            SincronizacionCreacionUiState.PendienteDeSubir(
+                                nombreAlimento = alimentoNuevo.nombre,
+                                mensaje = "⚠ '${alimentoNuevo.nombre}' se subió a la nube, pero su movimiento COMPRA quedó guardado en Room pendiente de subir ('Subir mi historial a la nube' en Mi Perfil)."
+                            )
+                    }
                 },
                 onFailure = {
                     _sincronizacionCreacionState.value =
                         SincronizacionCreacionUiState.PendienteDeSubir(
                             nombreAlimento = alimentoNuevo.nombre,
-                            mensaje = "⚠ '${alimentoNuevo.nombre}' se guardó en Room y está pendiente de sincronizar (sin conexión). Puedes reintentar en Mi Perfil."
+                            mensaje = "⚠ '${alimentoNuevo.nombre}' y su movimiento COMPRA se guardaron en Room (sin conexión). Puedes subirlos desde Mi Perfil."
                         )
                 }
             )
@@ -382,14 +408,12 @@ class AlimentoViewModel(
     }
 
     /**
-     * Edita los datos generales de un alimento existente (Etapa 4C.3B):
+     * Edita los datos generales de un alimento existente (Etapa 4C.3B + sincronización de AJUSTE):
      * 1. Verifica que el alimento pertenezca al usuario autenticado y conserva su `remoteId` original.
      * 2. Guarda primero los cambios en Room marcando `pendienteSincronizacion = true` de forma persistente
-     *    (y registra movimiento AJUSTE si cambió [cantidadAnterior]).
-     * 3. Intenta actualizar el mismo documento en Firestore: `usuarios/{uid}/alimentos/{remoteId}`,
-     *    evitando sobrescribir cambios remotos más recientes si se detecta un conflicto.
-     * 4. Si se confirma en el servidor, marca `pendienteSincronizacion = false` en Room;
-     *    si falla Internet o hay conflicto, conserva el estado pendiente persistido en Room.
+     *    y, si cambió [cantidadAnterior], registra el movimiento `AJUSTE` con su `remoteId` UUID.
+     * 3. Sincroniza el alimento en `usuarios/{uid}/alimentos/{remoteId}` (con detección de conflictos)
+     *    y, si se generó un movimiento `AJUSTE`, lo sube automáticamente a `usuarios/{uid}/movimientos/{remoteId}`.
      */
     fun editarAlimento(
         alimento: Alimento,
@@ -403,7 +427,6 @@ class AlimentoViewModel(
         if (cantidadNueva < 0) { onError(); return }
 
         viewModelScope.launch {
-            // Verificar que el alimento exista en Room para este usuario y conservar su remoteId original
             val actualEnRoom = repository.obtenerAlimentoPorIdYUsuario(alimento.id, uid)
             if (actualEnRoom == null || actualEnRoom.usuarioUid.trim() != uid) {
                 onError()
@@ -426,67 +449,18 @@ class AlimentoViewModel(
                 baseRemotaActualizadoEn = actualEnRoom.baseRemotaActualizadoEn
             )
 
-            // 1. Guardar primero en Room (persiste pendienteSincronizacion = true incluso si se cierra la app)
-            val guardadoEnRoom = repository.editarAlimento(alimentoEditado, cantidadAnterior, uid)
-            if (!guardadoEnRoom) {
+            // 1. Transacción atómica en Room (actualiza alimento + registra AJUSTE si cambió la cantidad)
+            val resultadoLocal = repository.editarAlimento(alimentoEditado, cantidadAnterior, uid)
+            if (resultadoLocal == null) {
                 onError()
                 return@launch
             }
 
-            // 2. Comprobar que la sesión siga activa con el mismo UID antes de actualizar en Firestore
-            val uidVerificado = obtenerUidActivo()
-            if (uidVerificado == null || uidVerificado != uid) {
-                _sincronizacionCreacionState.value =
-                    SincronizacionCreacionUiState.PendienteDeSubir(
-                        nombreAlimento = alimentoEditado.nombre,
-                        mensaje = "⚠ Cambios de '${alimentoEditado.nombre}' guardados en Room. Quedó pendiente de sincronizar con la nube."
-                    )
-                return@launch
-            }
-
-            _sincronizacionCreacionState.value =
-                SincronizacionCreacionUiState.SubiendoNuevo(
-                    nombreAlimento = alimentoEditado.nombre,
-                    mensaje = "Guardado en Room. Sincronizando edición de '${alimentoEditado.nombre}' en la nube..."
-                )
-
-            // 3. Actualizar el mismo documento en usuarios/{uid}/alimentos/{remoteId} verificando conflictos
-            val resultado = firestoreAlimentoRepository.sincronizarEdicionAlimento(
-                uid = uidVerificado,
-                alimento = alimentoEditado
-            )
-
-            resultado.fold(
-                onSuccess = { respuesta ->
-                    when (respuesta.estado) {
-                        EstadoSincronizacionEdicion.SINCRONIZADO -> {
-                            repository.marcarAlimentoSincronizado(
-                                remoteId = remoteIdOriginal,
-                                usuarioUid = uidVerificado,
-                                actualizadoEnConfirmado = respuesta.actualizadoEnConfirmado
-                            )
-                            _sincronizacionCreacionState.value =
-                                SincronizacionCreacionUiState.Sincronizado(
-                                    nombreAlimento = alimentoEditado.nombre,
-                                    mensaje = "✓ Cambios de '${alimentoEditado.nombre}' guardados en Room y sincronizados en la nube."
-                                )
-                        }
-                        EstadoSincronizacionEdicion.CONFLICTO_REMOTO_MAS_RECIENTE -> {
-                            _sincronizacionCreacionState.value =
-                                SincronizacionCreacionUiState.ErrorSincronizacion(
-                                    nombreAlimento = alimentoEditado.nombre,
-                                    mensaje = "❌ Conflicto en '${alimentoEditado.nombre}': la nube tiene cambios más recientes y no se sobrescribió el documento remoto. Tus cambios locales siguen guardados en Room."
-                                )
-                        }
-                    }
-                },
-                onFailure = {
-                    _sincronizacionCreacionState.value =
-                        SincronizacionCreacionUiState.PendienteDeSubir(
-                            nombreAlimento = alimentoEditado.nombre,
-                            mensaje = "⚠ Cambios de '${alimentoEditado.nombre}' guardados en Room. Sin conexión: quedó pendiente de sincronizar (puedes reintentar desde Mi Perfil)."
-                        )
-                }
+            // 2. Sincronizar alimento y movimiento AJUSTE opcional con Cloud Firestore
+            sincronizarOperacionAlimentoYMovimiento(
+                uidInicial = uid,
+                resultadoLocal = resultadoLocal,
+                etiquetaOperacion = "Edición"
             )
         }
     }
@@ -570,16 +544,8 @@ class AlimentoViewModel(
     }
 
     /**
-     * Registra un consumo del alimento (Etapa 4C.3C):
-     * 1. Verifica que el UID del propietario coincida con el usuario autenticado y que la cantidad
-     *    solicitada sea mayor a 0 y no supere el stock disponible.
-     * 2. Ejecuta en una única transacción Room la reducción de `cantidadActual`, el marcado de
-     *    `pendienteSincronizacion = true` y `actualizadoEn`, y el registro del movimiento `CONSUMO`
-     *    en el historial local.
-     * 3. Intenta sincronizar la nueva cantidad con Cloud Firestore en `usuarios/{uid}/alimentos/{remoteId}`
-     *    reutilizando la detección de conflictos de la Etapa 4C.3B (sin sincronizar movimientos).
-     * 4. Si no hay Internet, conserva el consumo y su historial en Room con estado pendiente persistente
-     *    para poder reintentar desde Mi Perfil sin duplicar movimientos.
+     * Registra un consumo del alimento y sincroniza tanto el alimento como su movimiento `CONSUMO`
+     * hacia Cloud Firestore usando sus UUIDs persistentes.
      */
     fun consumir(alimento: Alimento, cantidad: Double, onError: () -> Unit = {}) {
         val uid = obtenerUidActivo() ?: run { onError(); return }
@@ -589,89 +555,27 @@ class AlimentoViewModel(
         if (cantidad <= 0 || cantidad > stockActual) { onError(); return }
 
         viewModelScope.launch {
-            val marcaConsumo = System.currentTimeMillis()
-
-            // 1. Transacción atómica en Room: actualizar cantidad + pendienteSincronizacion + movimiento CONSUMO
-            val alimentoConsumido = repository.consumirAlimento(
+            val resultadoLocal = repository.consumirAlimento(
                 alimentoId = alimento.id,
                 cantidad = cantidad,
                 usuarioUid = uid,
-                marcaActualizacion = marcaConsumo
-            )
-            if (alimentoConsumido == null) {
+                marcaActualizacion = System.currentTimeMillis()
+            ) ?: run {
                 onError()
                 return@launch
             }
 
-            // 2. Comprobar que la sesión siga activa con el mismo UID antes de sincronizar con Firestore
-            val uidVerificado = obtenerUidActivo()
-            if (uidVerificado == null || uidVerificado != uid) {
-                _sincronizacionCreacionState.value =
-                    SincronizacionCreacionUiState.PendienteDeSubir(
-                        nombreAlimento = alimentoConsumido.nombre,
-                        mensaje = "⚠ Consumo de '${alimentoConsumido.nombre}' guardado en Room. Quedó pendiente de sincronizar con la nube."
-                    )
-                return@launch
-            }
-
-            _sincronizacionCreacionState.value =
-                SincronizacionCreacionUiState.SubiendoNuevo(
-                    nombreAlimento = alimentoConsumido.nombre,
-                    mensaje = "Consumo registrado en Room. Sincronizando '${alimentoConsumido.nombre}' en la nube..."
-                )
-
-            // 3. Sincronizar la cantidad actualizada en usuarios/{uid}/alimentos/{remoteId} con detección de conflictos
-            val resultado = firestoreAlimentoRepository.sincronizarEdicionAlimento(
-                uid = uidVerificado,
-                alimento = alimentoConsumido
-            )
-
-            resultado.fold(
-                onSuccess = { respuesta ->
-                    when (respuesta.estado) {
-                        EstadoSincronizacionEdicion.SINCRONIZADO -> {
-                            repository.marcarAlimentoSincronizado(
-                                remoteId = alimentoConsumido.remoteId,
-                                usuarioUid = uidVerificado,
-                                actualizadoEnConfirmado = respuesta.actualizadoEnConfirmado
-                            )
-                            _sincronizacionCreacionState.value =
-                                SincronizacionCreacionUiState.Sincronizado(
-                                    nombreAlimento = alimentoConsumido.nombre,
-                                    mensaje = "✓ Consumo de '${alimentoConsumido.nombre}' registrado en Room y sincronizado en la nube."
-                                )
-                        }
-                        EstadoSincronizacionEdicion.CONFLICTO_REMOTO_MAS_RECIENTE -> {
-                            _sincronizacionCreacionState.value =
-                                SincronizacionCreacionUiState.ErrorSincronizacion(
-                                    nombreAlimento = alimentoConsumido.nombre,
-                                    mensaje = "❌ Conflicto al sincronizar consumo de '${alimentoConsumido.nombre}': la nube tiene cambios más recientes y no se sobrescribió el documento remoto."
-                                )
-                        }
-                    }
-                },
-                onFailure = {
-                    _sincronizacionCreacionState.value =
-                        SincronizacionCreacionUiState.PendienteDeSubir(
-                            nombreAlimento = alimentoConsumido.nombre,
-                            mensaje = "⚠ Consumo de '${alimentoConsumido.nombre}' guardado en Room. Sin conexión: quedó pendiente de sincronizar (puedes reintentar desde Mi Perfil)."
-                        )
-                }
+            sincronizarOperacionAlimentoYMovimiento(
+                uidInicial = uid,
+                resultadoLocal = resultadoLocal,
+                etiquetaOperacion = "Consumo"
             )
         }
     }
 
     /**
-     * Registra un desperdicio del alimento (Etapa 4C.3D):
-     * 1. Verifica que el UID del propietario coincida con el usuario autenticado y que la cantidad
-     *    desperdiciada sea mayor a 0 y no supere el stock disponible.
-     * 2. Ejecuta en una única transacción Room la reducción de `cantidadActual`, el marcado de
-     *    `pendienteSincronizacion = true` y `actualizadoEn`, y el registro del movimiento `DESPERDICIO`
-     *    en el historial local.
-     * 3. Intenta sincronizar la nueva cantidad con Cloud Firestore en `usuarios/{uid}/alimentos/{remoteId}`
-     *    reutilizando la detección de conflictos existente (sin sincronizar movimientos).
-     * 4. Si no hay Internet, conserva el cambio y su historial en Room con estado pendiente persistente
-     *    para poder reintentar desde Mi Perfil sin duplicar movimientos.
+     * Registra un desperdicio del alimento y sincroniza tanto el alimento como su movimiento `DESPERDICIO`
+     * hacia Cloud Firestore usando sus UUIDs persistentes.
      */
     fun desperdiciar(alimento: Alimento, cantidad: Double, onError: () -> Unit = {}) {
         val uid = obtenerUidActivo() ?: run { onError(); return }
@@ -681,89 +585,27 @@ class AlimentoViewModel(
         if (cantidad <= 0 || cantidad > stockActual) { onError(); return }
 
         viewModelScope.launch {
-            val marcaDesperdicio = System.currentTimeMillis()
-
-            // 1. Transacción atómica en Room: actualizar cantidad + pendienteSincronizacion + movimiento DESPERDICIO
-            val alimentoDesperdiciado = repository.desperdiciarAlimento(
+            val resultadoLocal = repository.desperdiciarAlimento(
                 alimentoId = alimento.id,
                 cantidad = cantidad,
                 usuarioUid = uid,
-                marcaActualizacion = marcaDesperdicio
-            )
-            if (alimentoDesperdiciado == null) {
+                marcaActualizacion = System.currentTimeMillis()
+            ) ?: run {
                 onError()
                 return@launch
             }
 
-            // 2. Comprobar que la sesión siga activa con el mismo UID antes de sincronizar con Firestore
-            val uidVerificado = obtenerUidActivo()
-            if (uidVerificado == null || uidVerificado != uid) {
-                _sincronizacionCreacionState.value =
-                    SincronizacionCreacionUiState.PendienteDeSubir(
-                        nombreAlimento = alimentoDesperdiciado.nombre,
-                        mensaje = "⚠ Desperdicio de '${alimentoDesperdiciado.nombre}' guardado en Room. Quedó pendiente de sincronizar con la nube."
-                    )
-                return@launch
-            }
-
-            _sincronizacionCreacionState.value =
-                SincronizacionCreacionUiState.SubiendoNuevo(
-                    nombreAlimento = alimentoDesperdiciado.nombre,
-                    mensaje = "Desperdicio registrado en Room. Sincronizando '${alimentoDesperdiciado.nombre}' en la nube..."
-                )
-
-            // 3. Sincronizar la cantidad actualizada en usuarios/{uid}/alimentos/{remoteId} con detección de conflictos
-            val resultado = firestoreAlimentoRepository.sincronizarEdicionAlimento(
-                uid = uidVerificado,
-                alimento = alimentoDesperdiciado
-            )
-
-            resultado.fold(
-                onSuccess = { respuesta ->
-                    when (respuesta.estado) {
-                        EstadoSincronizacionEdicion.SINCRONIZADO -> {
-                            repository.marcarAlimentoSincronizado(
-                                remoteId = alimentoDesperdiciado.remoteId,
-                                usuarioUid = uidVerificado,
-                                actualizadoEnConfirmado = respuesta.actualizadoEnConfirmado
-                            )
-                            _sincronizacionCreacionState.value =
-                                SincronizacionCreacionUiState.Sincronizado(
-                                    nombreAlimento = alimentoDesperdiciado.nombre,
-                                    mensaje = "✓ Desperdicio de '${alimentoDesperdiciado.nombre}' registrado en Room y sincronizado en la nube."
-                                )
-                        }
-                        EstadoSincronizacionEdicion.CONFLICTO_REMOTO_MAS_RECIENTE -> {
-                            _sincronizacionCreacionState.value =
-                                SincronizacionCreacionUiState.ErrorSincronizacion(
-                                    nombreAlimento = alimentoDesperdiciado.nombre,
-                                    mensaje = "❌ Conflicto al sincronizar desperdicio de '${alimentoDesperdiciado.nombre}': la nube tiene cambios más recientes y no se sobrescribió el documento remoto."
-                                )
-                        }
-                    }
-                },
-                onFailure = {
-                    _sincronizacionCreacionState.value =
-                        SincronizacionCreacionUiState.PendienteDeSubir(
-                            nombreAlimento = alimentoDesperdiciado.nombre,
-                            mensaje = "⚠ Desperdicio de '${alimentoDesperdiciado.nombre}' guardado en Room. Sin conexión: quedó pendiente de sincronizar (puedes reintentar desde Mi Perfil)."
-                        )
-                }
+            sincronizarOperacionAlimentoYMovimiento(
+                uidInicial = uid,
+                resultadoLocal = resultadoLocal,
+                etiquetaOperacion = "Desperdicio"
             )
         }
     }
 
     /**
-     * Aumenta manualmente el stock del alimento (Etapa 4C.3E):
-     * 1. Verifica que el UID del propietario coincida con el usuario autenticado, que la cantidad
-     *    adicional sea mayor a 0 y que el stock no sea negativo.
-     * 2. Ejecuta en una única transacción Room la actualización de `cantidadActual`, el marcado de
-     *    `pendienteSincronizacion = true` y `actualizadoEn`, y el registro del movimiento `AJUSTE`
-     *    en el historial local.
-     * 3. Intenta sincronizar el alimento actualizado con Cloud Firestore en `usuarios/{uid}/alimentos/{remoteId}`
-     *    reutilizando el mecanismo existente de timestamps y detección de conflictos.
-     * 4. Si no hay Internet, conserva el ajuste y su movimiento en Room con estado pendiente persistente
-     *    para poder reintentar desde Mi Perfil sin duplicar movimientos.
+     * Aumenta manualmente el stock del alimento y sincroniza tanto el alimento como su movimiento `AJUSTE`
+     * hacia Cloud Firestore usando sus UUIDs persistentes.
      */
     fun ajustarStock(alimento: Alimento, cantidadExtra: Double, onError: () -> Unit = {}) {
         val uid = obtenerUidActivo() ?: run { onError(); return }
@@ -774,76 +616,112 @@ class AlimentoViewModel(
         if (stockActual < 0 || stockActual + cantidadExtra < 0) { onError(); return }
 
         viewModelScope.launch {
-            val marcaAjuste = System.currentTimeMillis()
-
-            // 1. Transacción atómica en Room: actualizar cantidad + pendienteSincronizacion + movimiento AJUSTE
-            val alimentoAjustado = repository.ajustarStock(
+            val resultadoLocal = repository.ajustarStock(
                 alimento = alimento,
                 cantidadAjuste = cantidadExtra,
                 usuarioUid = uid,
-                marcaActualizacion = marcaAjuste
-            )
-            if (alimentoAjustado == null) {
+                marcaActualizacion = System.currentTimeMillis()
+            ) ?: run {
                 onError()
                 return@launch
             }
 
-            // 2. Comprobar que la sesión siga activa con el mismo UID antes de sincronizar con Firestore
-            val uidVerificado = obtenerUidActivo()
-            if (uidVerificado == null || uidVerificado != uid) {
-                _sincronizacionCreacionState.value =
-                    SincronizacionCreacionUiState.PendienteDeSubir(
-                        nombreAlimento = alimentoAjustado.nombre,
-                        mensaje = "⚠ Ajuste de stock de '${alimentoAjustado.nombre}' guardado en Room. Quedó pendiente de sincronizar con la nube."
-                    )
-                return@launch
-            }
+            sincronizarOperacionAlimentoYMovimiento(
+                uidInicial = uid,
+                resultadoLocal = resultadoLocal,
+                etiquetaOperacion = "Ajuste de stock"
+            )
+        }
+    }
 
+    /**
+     * Lógica común para sincronizar tras una transacción Room:
+     * 1. Verifica que la sesión siga activa con el mismo [uidInicial].
+     * 2. Si la transacción registró un movimiento (`CONSUMO`, `DESPERDICIO` o `AJUSTE`), lo sube
+     *    automáticamente a `usuarios/{uid}/movimientos/{remoteId}` reutilizando [FirestoreMovimientoRepository]
+     *    y su UUID persistente (sin duplicados).
+     * 3. Sincroniza el alimento actualizado en `usuarios/{uid}/alimentos/{remoteId}` con detección de conflictos.
+     * 4. Si no hay Internet, conserva el alimento y el movimiento en Room para poder reintentar desde Mi Perfil.
+     */
+    private suspend fun sincronizarOperacionAlimentoYMovimiento(
+        uidInicial: String,
+        resultadoLocal: ResultadoOperacionStock,
+        etiquetaOperacion: String
+    ) {
+        val alimentoActualizado = resultadoLocal.alimentoActualizado
+        val movimiento = resultadoLocal.movimientoRegistrado
+
+        val uidVerificado = obtenerUidActivo()
+        if (uidVerificado == null ||
+            uidVerificado != uidInicial ||
+            alimentoActualizado.usuarioUid.trim() != uidVerificado ||
+            (movimiento != null && movimiento.usuarioUid.trim() != uidVerificado)
+        ) {
             _sincronizacionCreacionState.value =
-                SincronizacionCreacionUiState.SubiendoNuevo(
-                    nombreAlimento = alimentoAjustado.nombre,
-                    mensaje = "Ajuste registrado en Room. Sincronizando '${alimentoAjustado.nombre}' en la nube..."
+                SincronizacionCreacionUiState.PendienteDeSubir(
+                    nombreAlimento = alimentoActualizado.nombre,
+                    mensaje = "⚠ $etiquetaOperacion de '${alimentoActualizado.nombre}' guardado en Room. Quedó pendiente de sincronizar con la nube."
                 )
+            return
+        }
 
-            // 3. Sincronizar el alimento actualizado en usuarios/{uid}/alimentos/{remoteId} con detección de conflictos
-            val resultado = firestoreAlimentoRepository.sincronizarEdicionAlimento(
-                uid = uidVerificado,
-                alimento = alimentoAjustado
+        _sincronizacionCreacionState.value =
+            SincronizacionCreacionUiState.SubiendoNuevo(
+                nombreAlimento = alimentoActualizado.nombre,
+                mensaje = "$etiquetaOperacion registrado en Room. Sincronizando '${alimentoActualizado.nombre}' en la nube..."
             )
 
-            resultado.fold(
-                onSuccess = { respuesta ->
-                    when (respuesta.estado) {
-                        EstadoSincronizacionEdicion.SINCRONIZADO -> {
-                            repository.marcarAlimentoSincronizado(
-                                remoteId = alimentoAjustado.remoteId,
-                                usuarioUid = uidVerificado,
-                                actualizadoEnConfirmado = respuesta.actualizadoEnConfirmado
-                            )
+        // Subir automáticamente el movimiento (CONSUMO, DESPERDICIO o AJUSTE) si se generó en la transacción
+        val resultadoMovimiento = movimiento?.let {
+            firestoreMovimientoRepository.subirMovimientoSiNoExiste(uidVerificado, it)
+        }
+
+        // Sincronizar el alimento actualizado en usuarios/{uid}/alimentos/{remoteId} con detección de conflictos
+        val resultadoAlimento = firestoreAlimentoRepository.sincronizarEdicionAlimento(
+            uid = uidVerificado,
+            alimento = alimentoActualizado
+        )
+
+        resultadoAlimento.fold(
+            onSuccess = { respuesta ->
+                when (respuesta.estado) {
+                    EstadoSincronizacionEdicion.SINCRONIZADO -> {
+                        repository.marcarAlimentoSincronizado(
+                            remoteId = alimentoActualizado.remoteId,
+                            usuarioUid = uidVerificado,
+                            actualizadoEnConfirmado = respuesta.actualizadoEnConfirmado
+                        )
+                        if (resultadoMovimiento == null || resultadoMovimiento.isSuccess) {
                             _sincronizacionCreacionState.value =
                                 SincronizacionCreacionUiState.Sincronizado(
-                                    nombreAlimento = alimentoAjustado.nombre,
-                                    mensaje = "✓ Ajuste de stock de '${alimentoAjustado.nombre}' registrado en Room y sincronizado en la nube."
+                                    nombreAlimento = alimentoActualizado.nombre,
+                                    mensaje = "✓ $etiquetaOperacion de '${alimentoActualizado.nombre}' registrado en Room y sincronizado en la nube."
                                 )
-                        }
-                        EstadoSincronizacionEdicion.CONFLICTO_REMOTO_MAS_RECIENTE -> {
+                        } else {
                             _sincronizacionCreacionState.value =
-                                SincronizacionCreacionUiState.ErrorSincronizacion(
-                                    nombreAlimento = alimentoAjustado.nombre,
-                                    mensaje = "❌ Conflicto al sincronizar ajuste de '${alimentoAjustado.nombre}': la nube tiene cambios más recientes y no se sobrescribió el documento remoto."
+                                SincronizacionCreacionUiState.PendienteDeSubir(
+                                    nombreAlimento = alimentoActualizado.nombre,
+                                    mensaje = "⚠ '${alimentoActualizado.nombre}' se actualizó en la nube, pero su movimiento ${movimiento.tipo.name} quedó en Room pendiente de subir ('Subir mi historial a la nube' en Mi Perfil)."
                                 )
                         }
                     }
-                },
-                onFailure = {
-                    _sincronizacionCreacionState.value =
-                        SincronizacionCreacionUiState.PendienteDeSubir(
-                            nombreAlimento = alimentoAjustado.nombre,
-                            mensaje = "⚠ Ajuste de stock de '${alimentoAjustado.nombre}' guardado en Room. Sin conexión: quedó pendiente de sincronizar (puedes reintentar desde Mi Perfil)."
-                        )
+                    EstadoSincronizacionEdicion.CONFLICTO_REMOTO_MAS_RECIENTE -> {
+                        _sincronizacionCreacionState.value =
+                            SincronizacionCreacionUiState.ErrorSincronizacion(
+                                nombreAlimento = alimentoActualizado.nombre,
+                                mensaje = "❌ Conflicto al sincronizar ${etiquetaOperacion.lowercase()} de '${alimentoActualizado.nombre}': la nube tiene cambios más recientes y no se sobrescribió el documento remoto."
+                            )
+                    }
                 }
-            )
-        }
+            },
+            onFailure = {
+                _sincronizacionCreacionState.value =
+                    SincronizacionCreacionUiState.PendienteDeSubir(
+                        nombreAlimento = alimentoActualizado.nombre,
+                        mensaje = "⚠ $etiquetaOperacion de '${alimentoActualizado.nombre}' guardado en Room. Sin conexión: quedó pendiente de sincronizar (puedes reintentar desde Mi Perfil)."
+                    )
+            }
+        )
     }
 
     /**
@@ -1166,7 +1044,8 @@ class AlimentoViewModel(
         private val repository: AlimentoRepository,
         private val movimientoRepository: MovimientoRepository,
         private val authRepository: AuthRepository = AuthRepository(),
-        private val firestoreAlimentoRepository: FirestoreAlimentoRepository = FirestoreAlimentoRepository()
+        private val firestoreAlimentoRepository: FirestoreAlimentoRepository = FirestoreAlimentoRepository(),
+        private val firestoreMovimientoRepository: FirestoreMovimientoRepository = FirestoreMovimientoRepository()
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -1175,7 +1054,8 @@ class AlimentoViewModel(
                     repository = repository,
                     movimientoRepository = movimientoRepository,
                     authRepository = authRepository,
-                    firestoreAlimentoRepository = firestoreAlimentoRepository
+                    firestoreAlimentoRepository = firestoreAlimentoRepository,
+                    firestoreMovimientoRepository = firestoreMovimientoRepository
                 ) as T
             }
             throw IllegalArgumentException("Unknown ViewModel class")

@@ -16,9 +16,11 @@ import com.example.ecodespensa.ui.pantry.AgregarAlimentoScreen
 import com.example.ecodespensa.ui.pantry.AlimentoViewModel
 import com.example.ecodespensa.ui.pantry.MiDespensaScreen
 import com.example.ecodespensa.ui.planner.PlanificadorSemanalScreen
+import com.example.ecodespensa.ui.planner.PlanificadorViewModel
 import com.example.ecodespensa.ui.profile.MiPerfilScreen
 import com.example.ecodespensa.ui.setup.ConfiguracionInicialScreen
 import com.example.ecodespensa.ui.shopping.ListaComprasScreen
+import com.example.ecodespensa.ui.shopping.ListaComprasViewModel
 import com.example.ecodespensa.ui.welcome.BienvenidaScreen
 
 /**
@@ -33,7 +35,9 @@ import com.example.ecodespensa.ui.welcome.BienvenidaScreen
 fun NavGraph(
     navController: NavHostController,
     alimentoViewModel: AlimentoViewModel,
-    movimientoViewModel: MovimientoViewModel
+    movimientoViewModel: MovimientoViewModel,
+    planificadorViewModel: PlanificadorViewModel,
+    listaComprasViewModel: ListaComprasViewModel
 ) {
     // AuthViewModel compartido en todo el grafo; Factory instancia AuthRepository internamente
     val authViewModel: AuthViewModel = viewModel(factory = AuthViewModel.Factory())
@@ -127,12 +131,14 @@ fun NavGraph(
 
         composable(Destino.PlanificadorSemanal.ruta) {
             PlanificadorSemanalScreen(
+                viewModel = planificadorViewModel,
                 onVolver = { navController.popBackStack() }
             )
         }
 
         composable(Destino.ListaCompras.ruta) {
             ListaComprasScreen(
+                viewModel = listaComprasViewModel,
                 onVolver = { navController.popBackStack() }
             )
         }
@@ -142,6 +148,8 @@ fun NavGraph(
                 authViewModel = authViewModel,
                 alimentoViewModel = alimentoViewModel,
                 movimientoViewModel = movimientoViewModel,
+                planificadorViewModel = planificadorViewModel,
+                listaComprasViewModel = listaComprasViewModel,
                 onVolver = { navController.popBackStack() },
                 onCerrarSesion = {
                     // Cerrar sesión ya fue llamado en MiPerfilScreen;

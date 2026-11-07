@@ -18,10 +18,14 @@ import androidx.work.WorkManager
 import com.example.ecodespensa.data.local.EcoDespensaDatabase
 import com.example.ecodespensa.data.repository.AlimentoRepositoryImpl
 import com.example.ecodespensa.data.repository.AuthRepository
+import com.example.ecodespensa.data.repository.ItemCompraRepositoryImpl
 import com.example.ecodespensa.data.repository.MovimientoRepositoryImpl
+import com.example.ecodespensa.data.repository.PlanComidaRepositoryImpl
 import com.example.ecodespensa.ui.history.MovimientoViewModel
 import com.example.ecodespensa.ui.navigation.NavGraph
 import com.example.ecodespensa.ui.pantry.AlimentoViewModel
+import com.example.ecodespensa.ui.planner.PlanificadorViewModel
+import com.example.ecodespensa.ui.shopping.ListaComprasViewModel
 import com.example.ecodespensa.ui.theme.EcoDespensaTheme
 import com.example.ecodespensa.worker.NotificationHelper
 import com.example.ecodespensa.worker.VencimientoWorker
@@ -55,6 +59,29 @@ class MainActivity : ComponentActivity() {
     private val movimientoViewModel: MovimientoViewModel by viewModels {
         MovimientoViewModel.Factory(
             repository = MovimientoRepositoryImpl(db.movimientoDao()),
+            authRepository = authRepository
+        )
+    }
+
+    private val planificadorViewModel: PlanificadorViewModel by viewModels {
+        PlanificadorViewModel.Factory(
+            planRepository = PlanComidaRepositoryImpl(db.planComidaDao()),
+            alimentoRepository = AlimentoRepositoryImpl(
+                dao = db.alimentoDao(),
+                transactionDao = db.despensaTransactionDao()
+            ),
+            authRepository = authRepository
+        )
+    }
+
+    private val listaComprasViewModel: ListaComprasViewModel by viewModels {
+        ListaComprasViewModel.Factory(
+            itemCompraRepository = ItemCompraRepositoryImpl(db.itemCompraDao()),
+            planComidaRepository = PlanComidaRepositoryImpl(db.planComidaDao()),
+            alimentoRepository = AlimentoRepositoryImpl(
+                dao = db.alimentoDao(),
+                transactionDao = db.despensaTransactionDao()
+            ),
             authRepository = authRepository
         )
     }
@@ -105,7 +132,9 @@ class MainActivity : ComponentActivity() {
                 NavGraph(
                     navController = navController,
                     alimentoViewModel = alimentoViewModel,
-                    movimientoViewModel = movimientoViewModel
+                    movimientoViewModel = movimientoViewModel,
+                    planificadorViewModel = planificadorViewModel,
+                    listaComprasViewModel = listaComprasViewModel
                 )
             }
         }

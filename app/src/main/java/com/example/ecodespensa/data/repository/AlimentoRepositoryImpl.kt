@@ -2,9 +2,11 @@ package com.example.ecodespensa.data.repository
 
 import com.example.ecodespensa.data.local.AlimentoDao
 import com.example.ecodespensa.data.local.DespensaTransactionDao
+import com.example.ecodespensa.data.local.ResultadoOperacionStock
 import com.example.ecodespensa.data.model.Alimento
 import com.example.ecodespensa.data.model.AlimentoFirestore
 import com.example.ecodespensa.data.model.EliminacionPendiente
+import com.example.ecodespensa.data.model.Movimiento
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -29,8 +31,8 @@ class AlimentoRepositoryImpl(
      * Inserta el alimento y registra automáticamente un movimiento COMPRA
      * en una única transacción Room. Si algo falla, ninguno se persiste.
      */
-    override suspend fun agregarAlimentoConCompra(alimento: Alimento) {
-        transactionDao.insertarAlimentoConCompra(alimento)
+    override suspend fun agregarAlimentoConCompra(alimento: Alimento): Movimiento {
+        return transactionDao.insertarAlimentoConCompra(alimento)
     }
 
     /**
@@ -69,8 +71,8 @@ class AlimentoRepositoryImpl(
         dao.insertar(alimento.copy(usuarioUid = usuarioUid))
     }
 
-    override suspend fun agregarAlimentoConCompra(alimento: Alimento, usuarioUid: String) {
-        transactionDao.insertarAlimentoConCompra(alimento.copy(usuarioUid = usuarioUid))
+    override suspend fun agregarAlimentoConCompra(alimento: Alimento, usuarioUid: String): Movimiento {
+        return transactionDao.insertarAlimentoConCompra(alimento.copy(usuarioUid = usuarioUid.trim()))
     }
 
     override suspend fun ajustarStock(
@@ -78,7 +80,7 @@ class AlimentoRepositoryImpl(
         cantidadAjuste: Double,
         usuarioUid: String,
         marcaActualizacion: Long
-    ): Alimento? {
+    ): ResultadoOperacionStock? {
         return transactionDao.ajustarStockConMovimiento(
             alimento = alimento.copy(usuarioUid = usuarioUid),
             cantidadAjuste = cantidadAjuste,
@@ -106,7 +108,7 @@ class AlimentoRepositoryImpl(
         alimento: Alimento,
         cantidadAnterior: Double,
         usuarioUid: String
-    ): Boolean {
+    ): ResultadoOperacionStock? {
         return transactionDao.editarAlimentoConAjuste(
             alimentoActualizado = alimento.copy(usuarioUid = usuarioUid),
             cantidadAnterior = cantidadAnterior,
@@ -119,7 +121,7 @@ class AlimentoRepositoryImpl(
         cantidad: Double,
         usuarioUid: String,
         marcaActualizacion: Long
-    ): Alimento? {
+    ): ResultadoOperacionStock? {
         return transactionDao.consumirAlimentoConMovimiento(
             alimentoId = alimentoId,
             cantidadConsumida = cantidad,
@@ -133,7 +135,7 @@ class AlimentoRepositoryImpl(
         cantidad: Double,
         usuarioUid: String,
         marcaActualizacion: Long
-    ): Alimento? {
+    ): ResultadoOperacionStock? {
         return transactionDao.desperdiciarAlimentoConMovimiento(
             alimentoId = alimentoId,
             cantidadDesperdiciada = cantidad,

@@ -9,8 +9,13 @@ import androidx.room.TypeConverters
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.example.ecodespensa.data.model.Alimento
+import com.example.ecodespensa.data.model.EliminacionItemCompraPendiente
 import com.example.ecodespensa.data.model.EliminacionPendiente
+import com.example.ecodespensa.data.model.EliminacionPlanPendiente
+import com.example.ecodespensa.data.model.IngredientePlanificado
+import com.example.ecodespensa.data.model.ItemCompra
 import com.example.ecodespensa.data.model.Movimiento
+import com.example.ecodespensa.data.model.PlanComida
 import com.example.ecodespensa.data.model.TipoMovimiento
 import java.util.UUID
 
@@ -33,11 +38,24 @@ class TipoMovimientoConverter {
  * Versión 5: agrega las columnas pendienteSincronizacion, actualizadoEn y baseRemotaActualizadoEn a alimentos.
  * Versión 6: agrega la tabla eliminaciones_pendientes (tombstones) para sincronizar eliminaciones con Firestore.
  * Versión 7: agrega la columna remoteId (UUID único persistente) a movimientos.
+ * Versión 8: agrega las tablas planes_comida e ingredientes_planificados para el Planificador Semanal.
+ * Versión 9: agrega la tabla items_compra para la Lista Inteligente de Compras.
+ * Versión 10: agrega la tabla eliminaciones_planes_pendientes (tombstones) para sincronizar bajas del Planificador Semanal.
+ * Versión 11: agrega la tabla eliminaciones_items_compra_pendientes (tombstones) para sincronizar bajas de la Lista de Compras.
  * Singleton para evitar múltiples instancias abiertas simultáneamente.
  */
 @Database(
-    entities = [Alimento::class, Movimiento::class, EliminacionPendiente::class],
-    version = 7,
+    entities = [
+        Alimento::class,
+        Movimiento::class,
+        EliminacionPendiente::class,
+        PlanComida::class,
+        IngredientePlanificado::class,
+        ItemCompra::class,
+        EliminacionPlanPendiente::class,
+        EliminacionItemCompraPendiente::class
+    ],
+    version = 11,
     exportSchema = false
 )
 @TypeConverters(TipoMovimientoConverter::class)
@@ -46,6 +64,8 @@ abstract class EcoDespensaDatabase : RoomDatabase() {
     abstract fun alimentoDao(): AlimentoDao
     abstract fun movimientoDao(): MovimientoDao
     abstract fun despensaTransactionDao(): DespensaTransactionDao
+    abstract fun planComidaDao(): PlanComidaDao
+    abstract fun itemCompraDao(): ItemCompraDao
 
     companion object {
         @Volatile
@@ -175,6 +195,124 @@ abstract class EcoDespensaDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Migración de versión 7 a 8: crea las tablas `planes_comida` e `ingredientes_planificados`
+         * para el Planificador Semanal de Comidas, conservando intactos todos los alimentos,
+         * movimientos y eliminaciones pendientes existentes.
+         */
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `planes_comida` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `remoteId` TEXT NOT NULL,
+                        `usuarioUid` TEXT NOT NULL,
+                        `fechaInicioSemana` TEXT NOT NULL,
+                        `diaSemana` INTEGER NOT NULL,
+                        `tipoComida` TEXT NOT NULL,
+                        `nombrePlato` TEXT NOT NULL,
+                        `pendienteSincronizacion` INTEGER NOT NULL,
+                        `actualizadoEn` INTEGER NOT NULL,
+                        `baseRemotaActualizadoEn` INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `ingredientes_planificados` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `remoteId` TEXT NOT NULL,
+                        `planId` INTEGER NOT NULL,
+                        `planRemoteId` TEXT NOT NULL,
+                        `usuarioUid` TEXT NOT NULL,
+                        `alimentoRemoteId` TEXT NOT NULL,
+                        `alimentoNombre` TEXT NOT NULL,
+                        `cantidadPlanificada` REAL NOT NULL,
+                        `unidad` TEXT NOT NULL
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
+        /**
+         * Migración de versión 8 a 9: crea la tabla `items_compra` para la Lista Inteligente de Compras,
+         * conservando intactos todos los alimentos, movimientos, eliminaciones pendientes y planes semanales.
+         */
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `items_compra` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `remoteId` TEXT NOT NULL,
+                        `usuarioUid` TEXT NOT NULL,
+                        `nombre` TEXT NOT NULL,
+                        `cantidad` REAL NOT NULL,
+                        `unidad` TEXT NOT NULL,
+                        `comprado` INTEGER NOT NULL,
+                        `origen` TEXT NOT NULL,
+                        `alimentoRemoteId` TEXT NOT NULL,
+                        `notaOrigen` TEXT NOT NULL,
+                        `pendienteSincronizacion` INTEGER NOT NULL,
+                        `actualizadoEn` INTEGER NOT NULL,
+                        `baseRemotaActualizadoEn` INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
+        /**
+         * Migración de versión 9 a 10: crea la tabla `eliminaciones_planes_pendientes` (tombstones)
+         * para registrar de forma persistente las eliminaciones de comidas del Planificador Semanal,
+         * evitando que los planes borrados localmente reaparezcan desde Cloud Firestore y conservando
+         * intactos todos los datos previos.
+         */
+        val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `eliminaciones_planes_pendientes` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `remoteId` TEXT NOT NULL,
+                        `usuarioUid` TEXT NOT NULL,
+                        `fechaInicioSemana` TEXT NOT NULL,
+                        `diaSemana` INTEGER NOT NULL,
+                        `tipoComida` TEXT NOT NULL,
+                        `nombrePlato` TEXT NOT NULL,
+                        `fechaEliminacion` INTEGER NOT NULL,
+                        `baseRemotaActualizadoEn` INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
+        /**
+         * Migración de versión 10 a 11: crea la tabla `eliminaciones_items_compra_pendientes` (tombstones)
+         * para registrar de forma persistente las eliminaciones de productos de la Lista Inteligente de Compras,
+         * evitando que los productos borrados o limpiados reaparezcan desde Cloud Firestore y conservando
+         * intactos todos los datos previos.
+         */
+        val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `eliminaciones_items_compra_pendientes` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `remoteId` TEXT NOT NULL,
+                        `usuarioUid` TEXT NOT NULL,
+                        `nombre` TEXT NOT NULL,
+                        `fechaEliminacion` INTEGER NOT NULL,
+                        `baseRemotaActualizadoEn` INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         fun getInstance(context: Context): EcoDespensaDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -188,7 +326,11 @@ abstract class EcoDespensaDatabase : RoomDatabase() {
                         MIGRATION_3_4,
                         MIGRATION_4_5,
                         MIGRATION_5_6,
-                        MIGRATION_6_7
+                        MIGRATION_6_7,
+                        MIGRATION_7_8,
+                        MIGRATION_8_9,
+                        MIGRATION_9_10,
+                        MIGRATION_10_11
                     )
                     .build()
                 INSTANCE = instance
