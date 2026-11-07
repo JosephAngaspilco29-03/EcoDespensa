@@ -32,11 +32,12 @@ class TipoMovimientoConverter {
  * Versión 4: agrega la columna remoteId (UUID único persistente) a alimentos.
  * Versión 5: agrega las columnas pendienteSincronizacion, actualizadoEn y baseRemotaActualizadoEn a alimentos.
  * Versión 6: agrega la tabla eliminaciones_pendientes (tombstones) para sincronizar eliminaciones con Firestore.
+ * Versión 7: agrega la columna remoteId (UUID único persistente) a movimientos.
  * Singleton para evitar múltiples instancias abiertas simultáneamente.
  */
 @Database(
     entities = [Alimento::class, Movimiento::class, EliminacionPendiente::class],
-    version = 6,
+    version = 7,
     exportSchema = false
 )
 @TypeConverters(TipoMovimientoConverter::class)
@@ -151,6 +152,29 @@ abstract class EcoDespensaDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Migración de versión 6 a 7: agrega `remoteId` a la tabla `movimientos` y genera por
+         * única vez un UUID único para cada movimiento existente, conservando todo el historial.
+         */
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE `movimientos` ADD COLUMN `remoteId` TEXT NOT NULL DEFAULT ''"
+                )
+                val ids = mutableListOf<Int>()
+                db.query("SELECT `id` FROM `movimientos` WHERE `remoteId` = ''").use { c ->
+                    val idIndex = c.getColumnIndexOrThrow("id")
+                    while (c.moveToNext()) ids.add(c.getInt(idIndex))
+                }
+                ids.forEach { id ->
+                    db.execSQL(
+                        "UPDATE `movimientos` SET `remoteId` = ? WHERE `id` = ?",
+                        arrayOf<Any>(UUID.randomUUID().toString(), id)
+                    )
+                }
+            }
+        }
+
         fun getInstance(context: Context): EcoDespensaDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -163,7 +187,8 @@ abstract class EcoDespensaDatabase : RoomDatabase() {
                         MIGRATION_2_3,
                         MIGRATION_3_4,
                         MIGRATION_4_5,
-                        MIGRATION_5_6
+                        MIGRATION_5_6,
+                        MIGRATION_6_7
                     )
                     .build()
                 INSTANCE = instance

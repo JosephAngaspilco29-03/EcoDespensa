@@ -17,6 +17,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.ecodespensa.ui.auth.AuthViewModel
+import com.example.ecodespensa.ui.history.DescargaHistorialUiState
+import com.example.ecodespensa.ui.history.MovimientoViewModel
+import com.example.ecodespensa.ui.history.SubidaHistorialUiState
 import com.example.ecodespensa.ui.pantry.AlimentoViewModel
 import com.example.ecodespensa.ui.pantry.DescargaNubeUiState
 import com.example.ecodespensa.ui.pantry.SubidaNubeUiState
@@ -33,7 +36,8 @@ fun MiPerfilScreen(
     onVolver: () -> Unit,
     onCerrarSesion: () -> Unit,
     authViewModel: AuthViewModel = viewModel(factory = AuthViewModel.Factory()),
-    alimentoViewModel: AlimentoViewModel? = null
+    alimentoViewModel: AlimentoViewModel? = null,
+    movimientoViewModel: MovimientoViewModel? = null
 ) {
     val usuario = authViewModel.usuarioActual
     val haySesionActiva = usuario?.uid?.isNotBlank() == true
@@ -68,10 +72,188 @@ fun MiPerfilScreen(
         ?.value ?: DescargaNubeUiState.Idle
 
     var mostrarDialogo by remember { mutableStateOf(false) }
+    var mensajeSinSesion by remember { mutableStateOf<String?>(null) }
+    var mostrarConfirmacionHistorial by remember { mutableStateOf(false) }
+    var mostrarConfirmacionDescargaHistorial by remember { mutableStateOf(false) }
+
+    val historialState = movimientoViewModel
+        ?.subidaHistorialState
+        ?.collectAsState()
+        ?.value ?: SubidaHistorialUiState.Idle
+
+    val descargaHistorialState = movimientoViewModel
+        ?.descargaHistorialState
+        ?.collectAsState()
+        ?.value ?: DescargaHistorialUiState.Idle
+
+    val movimientosCuenta = movimientoViewModel
+        ?.movimientos
+        ?.collectAsState()
+        ?.value
+        .orEmpty()
+
+    // Confirmación antes de recuperar el historial desde la nube
+    if (mostrarConfirmacionDescargaHistorial) {
+        AlertDialog(
+            onDismissRequest = { mostrarConfirmacionDescargaHistorial = false },
+            title = { Text("Recuperar mi historial de la nube") },
+            text = {
+                Text(
+                    "Se consultarán los movimientos almacenados en Cloud Firestore para tu cuenta actual.\n\n" +
+                        "• Solo se agregarán a Room los movimientos cuyo remoteId aún no exista localmente.\n" +
+                        "• Tu historial local existente no será borrado ni sobrescrito.\n" +
+                        "• No se alterará el stock ni se recrearán alimentos eliminados.\n" +
+                        "• No se generarán movimientos de compra, consumo ni ajuste adicionales.\n\n" +
+                        "¿Deseas confirmar la recuperación?"
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        mostrarConfirmacionDescargaHistorial = false
+                        if (!authViewModel.haySesionActiva || authViewModel.usuarioActual?.uid.isNullOrBlank()) {
+                            mensajeSinSesion = "No hay una sesión activa en Firebase. Inicia sesión primero."
+                        } else {
+                            movimientoViewModel?.recuperarMiHistorialDeLaNube()
+                        }
+                    }
+                ) { Text("Confirmar") }
+            },
+            dismissButton = {
+                TextButton(onClick = { mostrarConfirmacionDescargaHistorial = false }) { Text("Cancelar") }
+            }
+        )
+    }
+
+    // Resultado o error de la recuperación del historial desde la nube
+    when (val estadoDescargaH = descargaHistorialState) {
+        is DescargaHistorialUiState.Resultado -> {
+            val res = estadoDescargaH.resumen
+            AlertDialog(
+                onDismissRequest = { movimientoViewModel?.limpiarEstadoDescargaHistorial() },
+                title = {
+                    Text(
+                        if (res.errores > 0) "Recuperación de historial con observaciones"
+                        else "Resultado de recuperación del historial"
+                    )
+                },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Movimientos encontrados en tu nube: ${res.totalRemotos}")
+                        Text("• Descargados (nuevos en Room): ${res.descargados}")
+                        Text("• Omitidos (ya existían localmente): ${res.omitidos}")
+                        Text("• Errores: ${res.errores}")
+                        if (res.errores > 0 && !res.detalleError.isNullOrBlank()) {
+                            Text(
+                                text = "Detalle: ${res.detalleError}",
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { movimientoViewModel?.limpiarEstadoDescargaHistorial() }) {
+                        Text("Aceptar")
+                    }
+                }
+            )
+        }
+        is DescargaHistorialUiState.ErrorBloqueante -> {
+            AlertDialog(
+                onDismissRequest = { movimientoViewModel?.limpiarEstadoDescargaHistorial() },
+                title = { Text("No se pudo recuperar el historial") },
+                text = { Text(estadoDescargaH.mensaje) },
+                confirmButton = {
+                    TextButton(onClick = { movimientoViewModel?.limpiarEstadoDescargaHistorial() }) {
+                        Text("Aceptar")
+                    }
+                }
+            )
+        }
+        else -> Unit
+    }
+
+    // Confirmación antes de subir el historial
+    if (mostrarConfirmacionHistorial) {
+        AlertDialog(
+            onDismissRequest = { mostrarConfirmacionHistorial = false },
+            title = { Text("Subir mi historial a la nube") },
+            text = {
+                Text(
+                    "Tienes ${movimientosCuenta.size} movimiento(s) en tu cuenta actual.\n\n" +
+                        "• Se subirán a Cloud Firestore usando su identificador único.\n" +
+                        "• Los que ya existan en la nube se omitirán sin sobrescribirlos.\n" +
+                        "• No se generarán movimientos nuevos ni se modificará tu historial local.\n\n" +
+                        "¿Deseas confirmar la subida?"
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        mostrarConfirmacionHistorial = false
+                        if (!authViewModel.haySesionActiva || authViewModel.usuarioActual?.uid.isNullOrBlank()) {
+                            mensajeSinSesion = "No hay una sesión activa en Firebase. Inicia sesión primero."
+                        } else {
+                            movimientoViewModel?.subirMiHistorialALaNube()
+                        }
+                    }
+                ) { Text("Confirmar") }
+            },
+            dismissButton = {
+                TextButton(onClick = { mostrarConfirmacionHistorial = false }) { Text("Cancelar") }
+            }
+        )
+    }
+
+    // Resultado o error de la subida del historial
+    when (val estadoH = historialState) {
+        is SubidaHistorialUiState.Resultado -> {
+            val res = estadoH.resumen
+            AlertDialog(
+                onDismissRequest = { movimientoViewModel?.limpiarEstadoSubidaHistorial() },
+                title = {
+                    Text(if (res.errores > 0) "Subida de historial con errores" else "Resultado de subida del historial")
+                },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Movimientos evaluados de tu cuenta: ${res.total}")
+                        Text("• Subidos: ${res.subidos}")
+                        Text("• Omitidos (ya existían): ${res.omitidos}")
+                        Text("• Errores: ${res.errores}")
+                        if (res.errores > 0 && !res.detalleError.isNullOrBlank()) {
+                            Text(
+                                text = "Detalle: ${res.detalleError}",
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { movimientoViewModel?.limpiarEstadoSubidaHistorial() }) {
+                        Text("Aceptar")
+                    }
+                }
+            )
+        }
+        is SubidaHistorialUiState.ErrorBloqueante -> {
+            AlertDialog(
+                onDismissRequest = { movimientoViewModel?.limpiarEstadoSubidaHistorial() },
+                title = { Text("No se pudo subir el historial") },
+                text = { Text(estadoH.mensaje) },
+                confirmButton = {
+                    TextButton(onClick = { movimientoViewModel?.limpiarEstadoSubidaHistorial() }) {
+                        Text("Aceptar")
+                    }
+                }
+            )
+        }
+        else -> Unit
+    }
     var mostrarDialogoVincular by remember { mutableStateOf(false) }
     var mostrarConfirmacionSubida by remember { mutableStateOf(false) }
     var mostrarConfirmacionDescarga by remember { mutableStateOf(false) }
-    var mensajeSinSesion by remember { mutableStateOf<String?>(null) }
 
     // Diálogo cuando se intenta operar sin sesión activa
     if (mensajeSinSesion != null) {
@@ -447,7 +629,38 @@ fun MiPerfilScreen(
             }
 
             val operacionNubeEnCurso =
-                subidaState is SubidaNubeUiState.Subiendo || descargaState is DescargaNubeUiState.Descargando
+                subidaState is SubidaNubeUiState.Subiendo ||
+                    descargaState is DescargaNubeUiState.Descargando ||
+                    historialState is SubidaHistorialUiState.Subiendo ||
+                    descargaHistorialState is DescargaHistorialUiState.Descargando
+
+            if (historialState is SubidaHistorialUiState.Subiendo) {
+                val progresoH = if (historialState.total > 0) {
+                    historialState.procesados.toFloat() / historialState.total.toFloat()
+                } else 0f
+                LinearProgressIndicator(
+                    progress = { progresoH },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "Subiendo historial (${historialState.procesados}/${historialState.total})...",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+            }
+
+            if (descargaHistorialState is DescargaHistorialUiState.Descargando) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "Recuperando historial desde la nube...",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+            }
 
             if (descargaState is DescargaNubeUiState.Descargando) {
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
@@ -502,6 +715,52 @@ fun MiPerfilScreen(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text("Recuperar alimentos de la nube")
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Botón manual de subida del historial de movimientos
+            OutlinedButton(
+                onClick = {
+                    if (!haySesionActiva || authViewModel.usuarioActual?.uid.isNullOrBlank()) {
+                        mensajeSinSesion = "No hay una sesión activa. Inicia sesión para subir tu historial."
+                    } else {
+                        mostrarConfirmacionHistorial = true
+                    }
+                },
+                enabled = !operacionNubeEnCurso && movimientoViewModel != null,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(
+                    imageVector = Icons.Default.CloudUpload,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Subir mi historial a la nube")
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Botón manual de recuperación del historial desde Cloud Firestore hacia Room
+            OutlinedButton(
+                onClick = {
+                    if (!haySesionActiva || authViewModel.usuarioActual?.uid.isNullOrBlank()) {
+                        mensajeSinSesion = "No hay una sesión activa. Inicia sesión para recuperar tu historial."
+                    } else {
+                        mostrarConfirmacionDescargaHistorial = true
+                    }
+                },
+                enabled = !operacionNubeEnCurso && movimientoViewModel != null,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(
+                    imageVector = Icons.Default.CloudDownload,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Recuperar mi historial de la nube")
             }
 
             Spacer(modifier = Modifier.height(12.dp))

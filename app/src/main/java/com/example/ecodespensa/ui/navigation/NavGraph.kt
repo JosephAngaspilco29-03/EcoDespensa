@@ -141,6 +141,7 @@ fun NavGraph(
             MiPerfilScreen(
                 authViewModel = authViewModel,
                 alimentoViewModel = alimentoViewModel,
+                movimientoViewModel = movimientoViewModel,
                 onVolver = { navController.popBackStack() },
                 onCerrarSesion = {
                     // Cerrar sesión ya fue llamado en MiPerfilScreen;
