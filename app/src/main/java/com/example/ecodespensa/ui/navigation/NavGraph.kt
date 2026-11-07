@@ -14,6 +14,7 @@ import com.example.ecodespensa.ui.history.MovimientoViewModel
 import com.example.ecodespensa.ui.home.InicioScreen
 import com.example.ecodespensa.ui.pantry.AgregarAlimentoScreen
 import com.example.ecodespensa.ui.pantry.AlimentoViewModel
+import com.example.ecodespensa.ui.pantry.CapturaAlimentoCameraScreen
 import com.example.ecodespensa.ui.pantry.MiDespensaScreen
 import com.example.ecodespensa.ui.planner.PlanificadorSemanalScreen
 import com.example.ecodespensa.ui.planner.PlanificadorViewModel
@@ -125,7 +126,23 @@ fun NavGraph(
             AgregarAlimentoScreen(
                 viewModel = alimentoViewModel,
                 onGuardar = { navController.popBackStack() },
-                onVolver = { navController.popBackStack() }
+                onVolver = { navController.popBackStack() },
+                onAbrirCamara = {
+                    navController.navigate(Destino.CapturaCamaraAlimento.ruta)
+                }
+            )
+        }
+
+        composable(Destino.CapturaCamaraAlimento.ruta) {
+            val context = androidx.compose.ui.platform.LocalContext.current
+            CapturaAlimentoCameraScreen(
+                onConfirmarCaptura = { entrada ->
+                    alimentoViewModel.confirmarCapturaCamaraParaReconocimiento(context, entrada)
+                    navController.popBackStack()
+                },
+                onCancelarYVolver = {
+                    navController.popBackStack()
+                }
             )
         }
 

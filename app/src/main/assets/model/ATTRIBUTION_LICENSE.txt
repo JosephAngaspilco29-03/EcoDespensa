@@ -1,0 +1,11 @@
+MODELO: FruitsClassifier.tflite
+ORIGEN: https://github.com/iqbalansyor/android-fruit-recognition (app/src/main/assets/model/FruitsClassifier.tflite)
+AUTOR ORIGINAL: Iqbal Ansyor (iqbalansyor)
+LICENCIA DECLARADA EN EL REPOSITORIO (README.md): MIT License
+ARQUITECTURA BASE: MobileNetV2 (TensorFlow / Keras, Apache License 2.0)
+TENSORES VERIFICADOS:
+- Entrada: float32[1, 150, 150, 3], RGB normalizado en [0.0, 1.0] (rescale = 1.0 / 255.0)
+- Salida: float32[1, 6], probabilidades Softmax para [Apple, Banana, Lemon, Onion, Potato, Watermelon]
+
+Nota: El repositorio original declara expresamente "License: MIT" en su README.md sin incluir un archivo LICENSE independiente en la raíz. Se conserva esta atribución de autoría y licencia conforme a los términos permisivos de MIT para uso académico en EcoDespensa.
+

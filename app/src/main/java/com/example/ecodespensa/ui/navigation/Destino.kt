@@ -12,6 +12,7 @@ sealed class Destino(val ruta: String) {
     data object Inicio : Destino("inicio")
     data object MiDespensa : Destino("mi_despensa")
     data object AgregarAlimento : Destino("agregar_alimento")
+    data object CapturaCamaraAlimento : Destino("captura_camara_alimento")
     data object PlanificadorSemanal : Destino("planificador_semanal")
     data object ListaCompras : Destino("lista_compras")
     data object MiPerfil : Destino("mi_perfil")

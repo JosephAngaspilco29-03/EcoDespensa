@@ -1,0 +1,7 @@
+Manzana|Fruta|Apple
+Plátano|Fruta|Banana
+Limón|Fruta|Lemon
+Cebolla|Vegetal|Onion
+Papa|Verdura|Potato
+Sandía|Fruta|Watermelon
+

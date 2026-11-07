@@ -1,5 +1,6 @@
 package com.example.ecodespensa.ui.pantry
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -19,6 +20,12 @@ import com.example.ecodespensa.data.repository.FirestoreMovimientoRepository
 import com.example.ecodespensa.data.repository.MovimientoRepository
 import com.example.ecodespensa.data.repository.ResultadoDescargaDespensa
 import com.example.ecodespensa.data.repository.ResultadoSubidaDespensa
+import com.example.ecodespensa.ml.ImagenEntradaReconocimiento
+import com.example.ecodespensa.ml.PrediccionAlimento
+import com.example.ecodespensa.ml.ProcesadorImagenCamara
+import com.example.ecodespensa.ml.ReconocedorAlimentoContract
+import com.example.ecodespensa.ml.ReconocedorAlimentoTFLitePreparado
+import com.example.ecodespensa.ml.ResultadoReconocimientoAlimento
 import com.example.ecodespensa.util.calcularEstado
 import com.example.ecodespensa.util.parsearFecha
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -32,10 +39,30 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
+
+/**
+ * Estado persistido en el ViewModel para el formulario "Agregar alimento", de modo que
+ * al abrir/cerrar la cámara, regresar sin tomar foto o recomponer la pantalla no se pierda
+ * ningún campo escrito por el usuario.
+ */
+data class FormularioAgregarAlimentoUiState(
+    val nombre: String = "",
+    val categoria: String = "",
+    val cantidadActual: String = "",
+    val unidad: String = "",
+    val fechaCompra: String = "",
+    val fechaVencimiento: String = "",
+    val imagenCapturada: ImagenEntradaReconocimiento? = null,
+    val analizandoImagen: Boolean = false,
+    val resultadoReconocimiento: ResultadoReconocimientoAlimento? = null,
+    val sugerenciaPendienteConfirmacion: PrediccionAlimento? = null,
+    val versionSincronizacionCampos: Int = 0
+)
 
 /**
  * Estado de la operación manual de subida de alimentos a Cloud Firestore.
@@ -117,10 +144,16 @@ class AlimentoViewModel(
     private val movimientoRepository: MovimientoRepository,
     private val authRepository: AuthRepository = AuthRepository(),
     private val firestoreAlimentoRepository: FirestoreAlimentoRepository = FirestoreAlimentoRepository(),
-    private val firestoreMovimientoRepository: FirestoreMovimientoRepository = FirestoreMovimientoRepository()
+    private val firestoreMovimientoRepository: FirestoreMovimientoRepository = FirestoreMovimientoRepository(),
+    private val reconocedorAlimento: ReconocedorAlimentoContract = ReconocedorAlimentoTFLitePreparado()
 ) : ViewModel() {
 
     private val _vinculandoDatos = MutableStateFlow(false)
+
+    private val _formularioAgregarState =
+        MutableStateFlow(FormularioAgregarAlimentoUiState())
+    val formularioAgregarState: StateFlow<FormularioAgregarAlimentoUiState> =
+        _formularioAgregarState.asStateFlow()
 
     private val _subidaNubeState = MutableStateFlow<SubidaNubeUiState>(SubidaNubeUiState.Idle)
     val subidaNubeState: StateFlow<SubidaNubeUiState> = _subidaNubeState.asStateFlow()
@@ -1024,6 +1057,200 @@ class AlimentoViewModel(
         if (_descargaNubeState.value !is DescargaNubeUiState.Descargando) {
             _descargaNubeState.value = DescargaNubeUiState.Idle
         }
+    }
+
+    // ── Borrador de Agregar Alimento y Reconocimiento con Cámara (Etapas 7A + 7B) ──
+
+    private var ultimaCapturaAnalizadaEnMs: Long = -1L
+
+    fun actualizarBorradorAgregarAlimento(
+        nombre: String? = null,
+        categoria: String? = null,
+        cantidadActual: String? = null,
+        unidad: String? = null,
+        fechaCompra: String? = null,
+        fechaVencimiento: String? = null
+    ) {
+        _formularioAgregarState.update { actual ->
+            actual.copy(
+                nombre = nombre ?: actual.nombre,
+                categoria = categoria ?: actual.categoria,
+                cantidadActual = cantidadActual ?: actual.cantidadActual,
+                unidad = unidad ?: actual.unidad,
+                fechaCompra = fechaCompra ?: actual.fechaCompra,
+                fechaVencimiento = fechaVencimiento ?: actual.fechaVencimiento
+            )
+        }
+    }
+
+    /**
+     * Recibe la fotografía confirmada en la pantalla de cámara (`CapturaAlimentoCameraScreen`),
+     * ejecuta una única vez por captura el contrato [ReconocedorAlimentoContract] y:
+     * - Si la predicción es confiable ([ResultadoReconocimientoAlimento.Exito]):
+     *   - Completa automáticamente `nombre` y `categoria` si estaban vacíos (o ya coincidían).
+     *   - Si el usuario ya había escrito otro `nombre` o `categoria` antes de abrir la cámara,
+     *     NO los sobrescribe sin confirmación y guarda la sugerencia en `sugerenciaPendienteConfirmacion`.
+     * - Si la confianza es baja ([ResultadoReconocimientoAlimento.BajaConfianza]), no rellena ningún campo.
+     * - Nunca rellena `cantidadActual`, `unidad`, `fechaCompra` ni `fechaVencimiento`, ni guarda automáticamente.
+     */
+    fun confirmarCapturaCamaraParaReconocimiento(
+        context: Context,
+        entrada: ImagenEntradaReconocimiento
+    ) {
+        if (entrada.capturadaEnMs > 0L && entrada.capturadaEnMs == ultimaCapturaAnalizadaEnMs) {
+            return
+        }
+        ultimaCapturaAnalizadaEnMs = entrada.capturadaEnMs
+
+        val appContext = context.applicationContext
+        val rutaAnterior = _formularioAgregarState.value.imagenCapturada?.rutaArchivoTemporal
+        if (rutaAnterior != null && rutaAnterior != entrada.rutaArchivoTemporal) {
+            ProcesadorImagenCamara.eliminarArchivoTemporalSeguro(rutaAnterior)
+        }
+
+        _formularioAgregarState.update { actual ->
+            actual.copy(
+                imagenCapturada = entrada,
+                analizandoImagen = true,
+                resultadoReconocimiento = null,
+                sugerenciaPendienteConfirmacion = null
+            )
+        }
+
+        viewModelScope.launch {
+            val resultado = runCatching {
+                reconocedorAlimento.analizarImagen(appContext, entrada)
+            }.getOrElse { error ->
+                ResultadoReconocimientoAlimento.Error(
+                    error.localizedMessage ?: "No se pudo analizar la fotografía capturada."
+                )
+            }
+
+            _formularioAgregarState.update { actual ->
+                // Si el usuario descartó o cambió la foto mientras corría la inferencia, ignorar resultado obsoleto
+                if (actual.imagenCapturada?.capturadaEnMs != entrada.capturadaEnMs) {
+                    return@update actual
+                }
+
+                when (resultado) {
+                    is ResultadoReconocimientoAlimento.Exito -> {
+                        val pred = resultado.prediccionPrincipal
+                        val nombreDetectado = pred.etiqueta.trim()
+                        val categoriaDetectada = pred.categoriaSugerida?.trim().orEmpty()
+
+                        val tieneNombrePrevioDistinto = actual.nombre.isNotBlank() &&
+                            !actual.nombre.trim().equals(nombreDetectado, ignoreCase = true)
+                        val tieneCategoriaPreviaDistinta = actual.categoria.isNotBlank() &&
+                            categoriaDetectada.isNotEmpty() &&
+                            !actual.categoria.trim().equals(categoriaDetectada, ignoreCase = true)
+
+                        if (!tieneNombrePrevioDistinto && !tieneCategoriaPreviaDistinta) {
+                            actual.copy(
+                                nombre = nombreDetectado.ifEmpty { actual.nombre },
+                                categoria = categoriaDetectada.ifEmpty { actual.categoria },
+                                analizandoImagen = false,
+                                resultadoReconocimiento = resultado,
+                                sugerenciaPendienteConfirmacion = null,
+                                versionSincronizacionCampos = actual.versionSincronizacionCampos + 1
+                            )
+                        } else {
+                            // No sobrescribir lo que el usuario ya escribió sin su confirmación
+                            actual.copy(
+                                analizandoImagen = false,
+                                resultadoReconocimiento = resultado,
+                                sugerenciaPendienteConfirmacion = pred
+                            )
+                        }
+                    }
+                    else -> {
+                        actual.copy(
+                            analizandoImagen = false,
+                            resultadoReconocimiento = resultado,
+                            sugerenciaPendienteConfirmacion = null
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Confirma reemplazar el nombre y la categoría previamente escritos por el usuario
+     * con los valores detectados por el reconocimiento.
+     */
+    fun confirmarReemplazoPorReconocimiento() {
+        _formularioAgregarState.update { actual ->
+            val sugerencia = actual.sugerenciaPendienteConfirmacion ?: return@update actual
+            actual.copy(
+                nombre = sugerencia.etiqueta.trim().ifEmpty { actual.nombre },
+                categoria = sugerencia.categoriaSugerida?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: actual.categoria,
+                sugerenciaPendienteConfirmacion = null,
+                versionSincronizacionCampos = actual.versionSincronizacionCampos + 1
+            )
+        }
+    }
+
+    /**
+     * Descarta el reemplazo sugerido y conserva intactos el nombre y la categoría que el usuario
+     * ya había escrito antes de usar la cámara.
+     */
+    fun descartarReemplazoPorReconocimiento() {
+        _formularioAgregarState.update { actual ->
+            actual.copy(sugerenciaPendienteConfirmacion = null)
+        }
+    }
+
+    /**
+     * Aplica manualmente una sugerencia de reconocimiento al formulario (nombre y categoría),
+     * conservando intactos los demás campos y manteniéndolos siempre editables por el usuario.
+     */
+    fun aplicarSugerenciaReconocimiento(prediccion: PrediccionAlimento) {
+        _formularioAgregarState.update { actual ->
+            actual.copy(
+                nombre = prediccion.etiqueta.trim().ifEmpty { actual.nombre },
+                categoria = prediccion.categoriaSugerida?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: actual.categoria,
+                sugerenciaPendienteConfirmacion = null,
+                versionSincronizacionCampos = actual.versionSincronizacionCampos + 1
+            )
+        }
+    }
+
+    /**
+     * Descarta únicamente la fotografía temporal capturada sin borrar los textos que el usuario
+     * ya escribió o editó en el formulario.
+     */
+    fun descartarFotoCapturadaFormulario() {
+        ultimaCapturaAnalizadaEnMs = -1L
+        val ruta = _formularioAgregarState.value.imagenCapturada?.rutaArchivoTemporal
+        ProcesadorImagenCamara.eliminarArchivoTemporalSeguro(ruta)
+        _formularioAgregarState.update { actual ->
+            actual.copy(
+                imagenCapturada = null,
+                analizandoImagen = false,
+                resultadoReconocimiento = null,
+                sugerenciaPendienteConfirmacion = null
+            )
+        }
+    }
+
+    /**
+     * Limpia el borrador completo de Agregar alimento y elimina el archivo temporal de la
+     * fotografía en el almacenamiento privado una vez guardado el alimento.
+     */
+    fun limpiarBorradorAgregarAlimento() {
+        ultimaCapturaAnalizadaEnMs = -1L
+        val ruta = _formularioAgregarState.value.imagenCapturada?.rutaArchivoTemporal
+        ProcesadorImagenCamara.eliminarArchivoTemporalSeguro(ruta)
+        _formularioAgregarState.value = FormularioAgregarAlimentoUiState()
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        val ruta = _formularioAgregarState.value.imagenCapturada?.rutaArchivoTemporal
+        ProcesadorImagenCamara.eliminarArchivoTemporalSeguro(ruta)
+        reconocedorAlimento.liberarRecursos()
     }
 
     private fun obtenerUidActivo(): String? =
